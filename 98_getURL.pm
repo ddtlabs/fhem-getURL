@@ -44,9 +44,8 @@ sub CommandGetURL($@)
     return "getURL: telnet protocol is not implemented right now";
   }
   else {
-    my $msg = "getURL Unsupported URL: $a->[0]";
-    Log 2, "getURL Unsupported URL: $a->[0]";
-    return "getURL: Unsupported URL: $a->[0]";
+    Log 2, "getURL Unsupported URL: $url";
+    return "getURL: Unsupported URL: $url";
   }
 
 }
@@ -93,41 +92,57 @@ sub CommandGetURL_httpReq($$$$)
     }
   }
 
-#failsafe
-#  delete $param->{sslargs}{SSL_version}
-#    if $param->{sslargs} && defined($param->{sslargs}{SSL_version}) &&
-#       $param->{sslargs}{SSL_version} =~ m'^(!?)(?:(SSLv(?:2|3|23|2/3))|(TLSv1([12]|_[12]])?)'ix;
-
+  # failsafe SSL_version
+  if ($param->{sslargs} && defined($param->{sslargs}{SSL_version})) {
+    my $err = CommandGetURL_check_SSL_version($param->{sslargs}{SSL_version});
+    if ($err) {
+      $err = "getURL ERROR: ".$err;
+      Log 2, $err;
+      return $err;
+    }
+  }
 
   # join header with \r\n
   $param->{header} .= "\r\n" if defined $param->{header} && @header;
   $param->{header} .= join("\r\n",@header);
   $param->{header} =~ s/\\n/\n/xg; # parseParams has escaped "\"
   $param->{header} =~ s/\\r/\r/xg;
-
   $param->{loglevel} = 1 if ($param->{debug} && $param->{debug} == 2);
-
-  # check sslargs syntax, delete if malformed.
-#  if ($param->{sslargs}) {
-#    my $sslargs = eval $param->{sslargs};
-#    if (!$@) {
-##      $param->{sslargs} = \%{ $sslargs };
-#      $param->{sslargs} = $sslargs;
-#    }
-#    else {
-#      Log 2, "getURL Malformed --sslargs argument $param->{sslargs} will be ignored.";
-#      Log 2, $@;
-#      delete $param->{sslargs};
-#    }
-#  }
-
-#  Debug "----------------------";
-#  Debug Dumper $param;
-#  Debug "----------------------";
 
   HttpUtils_NonblockingGet($param);
 }
 
+
+# ------------------------------------------------------------------------------
+# borrowed from IO/Socket/SSL.pm to prevent FHEM abort.
+sub CommandGetURL_check_SSL_version($)
+{
+  my $ver;
+  for (split(/\s*:\s*/,$_[0])) {
+    m{^(!?)(?:(SSL(?:v2|v3|v23|v2/3))|(TLSv1(?:_?[12])?))$}i
+    or return "invalid SSL_version specified";
+    my $not = $1;
+    ( my $v = lc($2||$3) ) =~s{^(...)}{\U$1};
+    if ( !$not ) {
+      return "cannot set multiple SSL protocols in SSL_version"
+          if $ver && $v ne $ver;
+      $ver = $v;
+      $ver =~s{/}{}; # interpret SSLv2/3 as SSLv23
+      $ver =~s{(TLSv1)(\d)}{$1\_$2}; # TLSv1_1
+    }
+  }
+
+  my $ctx_new_sub =  UNIVERSAL::can( 'Net::SSLeay',
+      $ver eq 'SSLv2'   ? 'CTX_v2_new' :
+      $ver eq 'SSLv3'   ? 'CTX_v3_new' :
+      $ver eq 'TLSv1'   ? 'CTX_tlsv1_new' :
+      $ver eq 'TLSv1_1' ? 'CTX_tlsv1_1_new' :
+      $ver eq 'TLSv1_2' ? 'CTX_tlsv1_2_new' :
+      'CTX_new'
+  ) or return "SSL Version $ver not supported";
+
+  return undef;
+}
 
 # ------------------------------------------------------------------------------
 sub CommandGetURL_httpParse($$$)
@@ -387,7 +402,6 @@ sub CommandGetURL_updateReadings($$$;$)
     readingsBeginUpdate($dhash);
 
     if( ref($data) eq 'HASH' ) {
-#Debug "HASH";
       my $s = "_";
       foreach my $key ( sort keys %{$data}) {
         my $reading = $dreading.$s.$key;
@@ -430,18 +444,15 @@ sub CommandGetURL_updateReadings($$$;$)
     }
 
     elsif( ref($data) eq 'SCALAR') {
-#Debug "SCALAR";
       Log 1, "getURL setreading [$dname:$dreading] ${ $data }" if $debug;
       readingsBulkUpdate($dhash, $dreading, ${ $data });
     }
     elsif( ref($data) eq '') {
-#Debug "NO REF";
       Log 1, "getURL setreading [$dname:$dreading] $data" if $debug;
       readingsBulkUpdate($dhash, $dreading, $data);
     }
     readingsEndUpdate($dhash, 1);
   }
-
 
   else { #defined $data
     if (defined $dhash->{READINGS}{$dreading}) {
