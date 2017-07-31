@@ -5,19 +5,55 @@ use strict;
 use warnings;
 use HttpUtils;
 use Data::Dumper;
+#use Text::Wrap;
 
 sub CommandGetURL($@);
-sub CommandGetURL_expandJSON($$;$$);
+sub getURL_expandJSON($$;$$);
+
+my $getURL_opts = {
+  '--define'          => { noParam => 1 },
+  '--force'           => { noParam => 1 },
+  '--status'          => { noParam => 1 },
+  '--capture'         => { noParam => 0 },
+  '--json'            => { noParam => 1 },
+  '--stripHtml'       => { noParam => 1 },
+  '--substitute'      => { noParam => 0 },
+  '--userFn'          => { noParam => 0 },
+  '--data'            => { noParam => 0 },
+  '--data-file'       => { noParam => 0 },
+  '--form_'           => { noParam => 0 },
+  '--method'          => { noParam => 0 },
+  '--httpversion'     => { noParam => 0 },
+  '--timeout'         => { noParam => 0 },
+  '--noshutdown'      => { noParam => 1 },
+  '--ignoreredirects' => { noParam => 1 },
+  '--digest'          => { noParam => 1 },
+  '--SSL_'            => { noParam => 0 },
+  '--debug'           => { noParam => 1 },
+  '--loglevel'        => { noParam => 0 },
+  '--hideurl'         => { noParam => 1 },
+  '--userExitFn'      => { noParam => 0 },
+  '--save'            => { noParam => 1 },
+  'header'            => { noParam => 0 }
+};
 
 my %json;
+my $cmdRef;
+
+my $http_def_timeout  = 5;
+my $dbg_strLen        = 53;
+my $helpOptsRows      = 3;
+my $helpOptsWidth     = 20;
+
+
 # ------------------------------------------------------------------------------
-sub getURL_Initialize($)
+sub getURL_Initialize($$)
 {
-  my %lhash   = ( Fn  => "CommandGetURL", 
-                  Hlp => "<url> [<device>:<reading>] <more optional arguments, see commandref>"
-                );
-  $cmds{getURL} = \%lhash;
-  $_[0]->{parseParams} = 1
+  $_[0]->{parseParams} = 1;
+  $cmds{getURL} = { 
+    Fn  => "CommandGetURL", 
+    Hlp => "Usage: getURL <url> [<device>:<reading>] <options>\n"
+  };
 }
 
 
@@ -25,23 +61,36 @@ sub getURL_Initialize($)
 sub CommandGetURL($@)
 {
   my ($hash, $cmd) = @_;
-  my ($a, $h) = parseParams($cmd);
-  my $url = $a->[0];
+  my ($err, $url, $sm, $opts, $d, $r);
   
-  return "Usage: getURL <url> [device:reading] <optional arguments, see commandref>"
-    if @$a < 1;
+  # some defaults
+  #$opts->{loglevel} = 4;
 
-  if ($h->{"--debug"} && $h->{"--debug"} =~ m/^[12]$/) {
-    my $logCmd = $h->{"--hideurl"} ? $cmd =~ s/$a->[0]/<hidden-url>/r : $cmd;
+  ($err, $url, $sm, $opts) = getURL_parseParams($cmd);
+  return $err if $err;
+
+  if ($url =~  m/^(help|\?)$/) {
+    my $help = getURL_help($hash, $cmd);
+    return $help;
+  }
+
+  # log whole cmd if --debug, hide url if requested
+  if ($opts->{"--debug"} && $opts->{"--debug"} =~ m/^[12]$/) {
+    my $logCmd = $opts->{"--hideurl"} ? $cmd =~ s/$url/<hidden-url>/r : $cmd;
     Log 1, "getURL $logCmd" ;
   }
 
+  # break up setMagic
+  ($err, $opts) = getURL_parseSetMagic($sm, $opts);
+  return $err if $err;
+  
+  # do the job
   if ($url =~ m'^https?://' || $url !~ m'://') {
-    CommandGetURL_httpReq($hash, $a, $h, $cmd);
+    getURL_httpReq($hash, $opts);
   }
-  elsif ($a->[0] =~ m'^telnet://') {
-    Log 1, "getURL telnet protocol is not implemented right now";
-    return "getURL: telnet protocol is not implemented right now";
+  elsif ($url =~ m'^telnet://') {
+    Log 1, "getURL telnet protocol is not implemented right now.";
+    return "getURL: telnet protocol is not implemented right now.";
   }
   else {
     Log 2, "getURL Unsupported URL: $url";
@@ -52,179 +101,405 @@ sub CommandGetURL($@)
 
 
 # ------------------------------------------------------------------------------
-sub CommandGetURL_httpReq($$$$)
+sub getURL_httpReq($$)
 {
-  my ($hash, $a, $h, $cmd) = @_;  # parseParams is used
-  my @header;
-  my $param = {
-    hash       => $hash,
-    timeout    => 5,
-    loglevel   => 4,
-    cmd        => $cmd,
-    callback   => \&CommandGetURL_httpParse,
-    setreading => ($a->[1] ? $a->[1] : undef)
-  };
+  my ($hash, $opts) = @_;  # parseParams is used
+  my ($err, $param);
+  
+  # convert $opts to $params (format used by httpUtils)
+  ($err, $param) = getURL_analyzeArguments($hash, $opts);
+  return $err if $err;
+  return undef if !defined $param;
 
-  # url handling (add leading "http(s)://" or/and trailing "/" if required
-  $param->{url} = $a->[0];
-  $param->{url} = "http://".$param->{url} if($param->{url} !~ m'https?://');
-  $param->{url} .= "/" if CommandGetURL_paramCount($param->{url}) <= 2 ;
-
-  foreach (keys %{$h}) {
-    # Arguments for HttpUtils -> move to $param hash reference
-    if (m/^--/) {
-      if (m/^--form-.+$/) {
-        $param->{data} .= "&" if( $param->{data} );
-        $param->{data} .= substr($_,7)."=".urlEncode($h->{$_});
-      }
-      elsif (m/^--SSL_.+$/) {
-        $param->{sslargs}{substr($_,2)} = $h->{$_};
-      }
-      else {
-        $param->{substr($_,2)} = $h->{$_};
-      }
-      # remove HttpUtils Params (--.*) from parseParams $h
-      delete $h->{$_};
-    }
-    # Arguments without leading -- become part of the header
-    else {
-      push @header, $_.": ".$h->{$_};
-    }
-  }
-
-  # failsafe SSL_version
-  if ($param->{sslargs} && defined($param->{sslargs}{SSL_version})) {
-    my $err = CommandGetURL_check_SSL_version($param->{sslargs}{SSL_version});
-    if ($err) {
-      $err = "getURL ERROR: ".$err;
-      Log 2, $err;
-      return $err;
-    }
-  }
-
-  # join header with \r\n
-  $param->{header} .= "\r\n" if defined $param->{header} && @header;
-  $param->{header} .= join("\r\n",@header);
-  $param->{header} =~ s/\\n/\n/xg; # parseParams has escaped "\"
-  $param->{header} =~ s/\\r/\r/xg;
-  $param->{loglevel} = 1 if ($param->{debug} && $param->{debug} == 2);
+  Log 1, "getURL: request data:\n$param->{data}" 
+    if ($param->{data} && $param->{debug});
+  $param->{loglevel} = 1 
+    if (!$param->{loglevel} && $param->{debug} && $param->{debug} == 2);
 
   HttpUtils_NonblockingGet($param);
 }
 
 
 # ------------------------------------------------------------------------------
-# borrowed from IO/Socket/SSL.pm to prevent FHEM abort.
-sub CommandGetURL_check_SSL_version($)
-{
-  my $ver;
-  for (split(/\s*:\s*/,$_[0])) {
-    m{^(!?)(?:(SSL(?:v2|v3|v23|v2/3))|(TLSv1(?:_?[12])?))$}i
-    or return "invalid SSL_version specified";
-    my $not = $1;
-    ( my $v = lc($2||$3) ) =~s{^(...)}{\U$1};
-    if ( !$not ) {
-      return "cannot set multiple SSL protocols in SSL_version"
-          if $ver && $v ne $ver;
-      $ver = $v;
-      $ver =~s{/}{}; # interpret SSLv2/3 as SSLv23
-      $ver =~s{(TLSv1)(\d)}{$1\_$2}; # TLSv1_1
-    }
-  }
-
-  my $ctx_new_sub =  UNIVERSAL::can( 'Net::SSLeay',
-      $ver eq 'SSLv2'   ? 'CTX_v2_new' :
-      $ver eq 'SSLv3'   ? 'CTX_v3_new' :
-      $ver eq 'TLSv1'   ? 'CTX_tlsv1_new' :
-      $ver eq 'TLSv1_1' ? 'CTX_tlsv1_1_new' :
-      $ver eq 'TLSv1_2' ? 'CTX_tlsv1_2_new' :
-      'CTX_new'
-  ) or return "SSL Version $ver not supported";
-
-  return undef;
-}
-
-# ------------------------------------------------------------------------------
-sub CommandGetURL_httpParse($$$)
+sub getURL_httpParse($$$)
 {
   my ($param, $err, $data) = @_;
   my $hash  = $param->{hash};
   my $name  = $hash->{NAME};
   my $debug = $param->{debug};
-  my $setreading = $param->{setreading};
+  my $d     = $param->{device};
+  my $r     = $param->{reading};
+  my $cmd   = $param->{cmd};
+  my $userExitFn = $param->{'userExitFn'};
   
   if($err ne "") {
-    Log 1, "getURL $param->{cmd}" if !$debug;
-    Log 1, "getURL ERROR while requesting $err";
-    #readingsSingleUpdate($hash, "fullResponse", "ERROR");
+    $err = "ERROR: ".$err;
+    Log 2, "getURL $param->{cmd}" if !$debug;
+    Log 2, "getURL $err";
   }
-  elsif(defined $data && $data ne ""){
-#Debug "param: ".Dumper $param;
 
-    chomp $data;
-#    Log $debug ? 1 : 4, "getURL got: $data from $param->{url}";
-    Log $debug ? 1 : 4, "getURL got: $data";
-    if ($param->{code} && $param->{code} =~ m/^[459]\d\d$/) {
-      $data = "HTTP ERROR: $param->{code}";
-      $err = 1;
+  Log $debug ? 1 : 4, "getURL received data: ". ($data ? "\n$data" : "<undef>");
+  chomp $data;
+
+  if ($d && $r) {
+    $data = undef if $param->{code} && $param->{code} =~ m/^[459]\d\d$/ && !$param->{force};
+    if (defined $data) {
+      $data = getURL_stripHtml($data,$debug) if $param->{stripHtml};
+      if ($param->{code} && $param->{code} !~ m/^[459]\d\d$/) {
+        $data = getURL_substitute($data, $param->{substitute}, $debug)
+          if $param->{substitute};
+        if ($param->{capture}) {
+          # $data becomes a hash referece
+          $data = getURL_capture($data, $param->{capture}, $debug);
+        }
+        elsif ($param->{json}) {
+          # $data becomes a hash referece
+          $data = getURL_decodeJSON($data, $param->{findJSON} ,$debug);
+        }
+        if ($param->{userFn}) {
+          $data = getURL_userFn($data, $param->{userFn}, $debug);
+        }
+      } # $param->{code} !~ m/^[459]
+    } # defined $data
+  } # $d && $r
+
+  if ($param->{httpheader} && $param->{status}) {
+    $err = (split("\n",$param->{httpheader}))[0];    #eg. HTTP/1.1 404 not found
+    $err =~ s'^HTTP/\d(\.\d)?\s+'' if $err;          #eg. 404 not found
+  }
+  elsif (!$param->{status}) {
+    $err = undef;  # no status reading will be written
+  }
+
+  # break out of notify loop detection.
+  if ( $d && $r && ($data || $err) ) {
+    InternalTimer(
+      gettimeofday(),
+      sub(){ getURL_updateReadings($defs{$d}, $r, $data, $cmd, $userExitFn, $err, $debug) },
+      $hash
+    );
+  }
+}
+
+
+# ------------------------------------------------------------------------------
+sub getURL_parseParams($) {
+  my ($cmd) = @_;
+  my ($a, $opts) = parseParams($cmd);
+  my ($err, $info);
+
+  my ($url, $sm) = split(" ", $cmd);         # non hash ref params
+  return getURL_help(undef, "") if !$url;    # at least 1 argument is needed.
+
+  return (undef, $url, undef, undef) if $url =~ m/^(help|\?)$/;
+
+  shift $a;                                              # remove url
+  shift $a if defined $a->[0] && $a->[0] =~ m/^\[.*\]/;  # remove sm if given
+
+  # check hash part of parseParams()
+  foreach my $opt ( keys %{ $opts } ) {
+    # respect special cases --form_xx --SSL_
+    if ($opt =~ m/^(--form_|--SSL_).*$/) {
+      if ($opt =~ m/^(--form_|--SSL_)$/) {
+        $err  = "getURL argument '$opt' is not valid. You have to expand the key.";
+        $info = "getURL help $opt";
+        last;
+      }
+      elsif ($opts->{$opt} eq "") {
+        $err  = "getURL Value for argument '$opt' missing.";
+        $info = "getURL help $1";
+        last;
+      }
     }
+    # check unknown arguments
+    elsif (!defined $getURL_opts->{$opt} && $opt =~ m/^--/) {
+      $err  = "getURL Unknown argument '$opt'.";
+      $info = "getURL help";
+      last;
+    }
+    # if argument == "--arg="
+    elsif ($opts->{$opt} eq "") {
+      if (defined $getURL_opts->{$opt} && $getURL_opts->{$opt}{noParam} == 1) {
+        $opts->{$opt} = 1;
+      }
+      # noParam == 0, a value must be specified
+      else {
+        $err  = "getURL Value for argument '$opt' missing.";
+        $info = "getURL help $opt";
+        last;
+      }
+    }
+  }
 
-    if ($setreading) {
-      #capture device/reading
-      $setreading =~ m/^\[(.*):(.*)\]$/;
-      if (defined $1 && defined $2) {
-        my ($d,$r) = ($1,$2);
-        if (IsDevice($d)) {
-          if (!$err) {
-            $data = CommandGetURL_stripHtml($data,$debug)
-              if $param->{stripHtml};
-            $data = CommandGetURL_substitute($data, $param->{substitute}, $debug)
-              if $param->{substitute};
- 
-            # $data becomes a referece
-            if ($param->{capture}) {
-              $data = CommandGetURL_capture($data, $param->{capture}, $debug);
-            }
-            elsif ($param->{decodeJSON} || $param->{findJSON}) {
-              $data = CommandGetURL_decodeJSON($data, $param->{findJSON} ,$debug);
-            }
-          }
-
-          # break out of notify loop detection.
-          InternalTimer(
-            gettimeofday(),
-            sub(){ CommandGetURL_updateReadings($defs{$d}, $r, $data, $debug) },
-            $hash
-          );
+  # add array part of pasereParams() to hash reference
+  if(!$err) {
+    foreach my $arg (@{ $a }) {
+      # respect special cases --form_xx --SSL_
+      if ($arg =~ m/^(--form_|--SSL_)$/) {   
+        $err  = "getURL argument '$arg' needs to be expanded and a value is required.";
+        $info = "getURL help $1";
+        last;
+      }
+      # respect special cases --form_xx --SSL_
+      elsif ( $arg =~ m/^(--form_|--SSL_).+/) {
+        $err  = "getURL argument '$arg' needs a value. ";
+        $info = "getURL help $1";
+        last;
+      }
+      elsif (defined $getURL_opts->{$arg}) {
+        if ($getURL_opts->{"$arg"}{noParam} == 1) {
+          $opts->{$arg} = 1;
         }
         else {
-          Log 2, "getURL ERROR: Device $d $setreading don't exist.";
+          $err = "getURL Value is missing for argument '$arg'.";
+          $info = "getURL help $arg";
+          last;
         }
       }
-      else { #if (defined $1 && defined $2)
-        Log 2, "getURL ERROR: Invalid [device:reading] argument: $setreading.";
+      else {
+        $err = "getURL Argument '$arg' is not valid.";
+        $info = "getURL help";
+        last;
       }
     }
   }
+
+  if ($err) {
+    $err .= " Use '$info' for more information.";
+    Log 2, $err if $err;
+    return ($err, undef, undef, undef);
+  }
+
+  # add cmd and url to $opts reference
+  $opts->{'--cmd'} = $cmd;
+  $opts->{'--url'} = $url;
+
+  return ($err, $url, $sm, $opts);
 }
 
 
 # ------------------------------------------------------------------------------
-sub CommandGetURL_stripHtml($$)
+sub getURL_analyzeArguments($$) {
+  my ($hash, $opts) = @_;
+  my @header;
+  # some defaults for NonblockingGet
+  my $param;
+  my $err;
+  $param->{hash}     = $hash; #passthrough
+  $param->{timeout}  = $http_def_timeout;
+  $param->{callback} = \&getURL_httpParse;
+
+  foreach (keys %{$opts}) {
+    # Arguments for HttpUtils -> move to $param hash reference
+    if (m/^--/) {
+      if (m/^--form_.+$/) {
+        $param->{data} .= "&" if( $param->{data} );
+        $param->{data} .= substr($_,7)."=".urlEncode($opts->{$_});
+      }
+      elsif (m/^--SSL_.+$/) {
+        $param->{sslargs}{substr($_,2)} = $opts->{$_};
+      }
+      # args like: --debug, --stripHtml. capture
+      # but also --cmd, --url, --reading, --device
+      else {
+        $param->{substr($_,2)} = $opts->{$_};
+      }
+      # remove HttpUtils Params (--.*) from parseParams $opts
+      delete $opts->{$_};
+    }
+    # Arguments without leading -- become part of the header
+    else {
+      push @header, $_.": ".$opts->{$_};
+    }
+    $param->{header} = join("\r\n",@header);
+  }
+
+  # option --data-file
+  if (defined $param->{'data-file'}) {
+    my $mpath = $attr{global}{modpath}."/".$param->{'data-file'};
+    ($err, my @fdata) = FileRead({FileName => $mpath, ForceType => 'file'});
+    if($err) {
+      Log 2, "getURL $err";
+      return ("getURL $err", undef);
+    }
+    $param->{data} .= join("\n", @fdata);  #todo: encode?
+  }  
+
+  # expand urls to full http://boobar/
+  $param->{url} = "http://".$param->{url} if($param->{url} !~ m'https?://');
+  $param->{url} .= "/" if getURL_paramCount($param->{url}) <= 2 ;
+  
+return ($err, $param);
+}
+
+
+# ------------------------------------------------------------------------------
+sub getURL_parseSetMagic($$)
+{
+  my ($sm, $opts) = @_;
+  my ($d, $r, $err, $msg);
+
+  my $define = $opts->{'--define'};
+  my $save = $opts->{'--save'};
+
+  return (undef, $opts) if !$sm || $sm !~ m/^\[.*\]$/;
+
+  if ($sm && $sm =~ m/^\[(.+):([A-Za-z\d_\.\-\/]+)\]$/) {
+    $d = $1;
+    $r = $2;
+  
+    if(!IsDevice($d) && defined $define) {
+      $err = CommandDefine(undef, "$d dummy");
+      $err = "getURL Error while define dummy '$d': $err" if $err;
+      $msg = "getURL Dummy device '$d' successfully defined." if !$err;
+      if ($save) {
+        CommandSave(undef,undef);
+        $msg .= " Structural changes saved.";
+      }
+      Log 2, $msg;
+    }
+    elsif (!IsDevice($d)) {
+      $err = "getURL Device '$d' do not exist. Use option --define to create a dummy device.";
+    }
+  }
+  elsif ($sm) {
+    $err = "getURL Malformed device/reading combination '$sm', use [device:reading], allowed characters are: A-Za-z0-9._";
+  }
+
+  $opts->{'--device'}  = $d;
+  $opts->{'--reading'} = $r;
+
+  Log 2, $err if $err;
+  return ($err, $opts);
+}
+
+
+# ------------------------------------------------------------------------------
+sub getURL_updateReadings($$$$$$;$)
+{
+  my ($dhash, $dreading, $data, $cmd, $userExitFn, $err, $debug) = @_;
+  my $dname = $dhash->{NAME};
+  readingsBeginUpdate($dhash);
+
+  if(defined($data)) {
+    # remove illegal letters from reading name
+    $dreading =~ s/[^A-Za-z\d_\.\-\/]/_/g;
+
+    if( ref($data) eq 'HASH' ) {
+      my $s = "_";
+      foreach my $key ( sort keys %{$data}) {
+        my $reading = $dreading.$s.$key;
+
+        # named capture groups
+        if (ref($data->{$key}) eq "HASH") {
+          foreach my $num (keys %{$data->{$key}}) {
+            # no numbering of singles values
+            my $r = (scalar keys $data->{$key} > 1) ? $reading.$s.$num 
+                                                    : $reading;
+            if (defined $data->{$key}{$num}) {
+              readingsBulkUpdate($dhash, $r, $data->{$key}{$num});
+              Log 1, substr("getURL setreading [$dname:$r] \n$data->{$key}{$num}",0,$dbg_strLen) if $debug;
+            }
+            else {
+              if ($debug) {
+                Log 1, $dhash->{READINGS}{$r} 
+                  ? "getURL deletereading [$dname:$r]"
+                  : "getURL setreading [$dname:$r] \n'undef' (skipped due to undefined value)";
+              }
+              CommandDeleteReading( undef, "$dname $r" );
+            }
+          }
+        }
+
+        # unnamed capture groups
+        else {
+          if ($data->{$key}) {
+            Log 1, "getURL setreading $dname \n".$reading." ".$data->{$key} if $debug;
+            readingsBulkUpdate($dhash, $reading, $data->{$key});
+          }
+          else {
+            Log 1, "getURL deletereading [$dname:$reading] (due to undefined value)"
+              if $debug && $dhash->{READINGS}{$reading};
+            CommandDeleteReading( undef, "$dname $reading" );
+          }
+        }
+        
+      }
+    } # hash ref
+
+    elsif( ref($data) eq 'ARRAY' ) {
+      my $i = 1;
+      foreach (@$data) {
+        readingsBulkUpdate($dhash, $dreading."-$i", $_);
+        $i++;
+      }
+    }
+
+    elsif( ref($data) eq 'SCALAR') {
+      Log 1, substr("getURL setreading [$dname:$dreading] \n${ $data }",0,$dbg_strLen) if $debug;
+      readingsBulkUpdate($dhash, $dreading, ${ $data });
+    }
+    elsif( ref($data) eq '') {
+      Log 1, substr("getURL setreading [$dname:$dreading] \n$data",0,$dbg_strLen) if $debug;
+      readingsBulkUpdate($dhash, $dreading, $data) if $data;
+    }
+
+  } # if defined $data
+
+  # delete reading(s)
+  else {
+    if (defined $dhash->{READINGS}{$dreading}) {
+      Log 1, "getURL deletereading [$dname:$dreading".".*]" if $debug;
+      CommandDeleteReading( undef, "$dname $dreading".".*" );
+    }
+  }
+
+  # add result reading if defined
+  Log 1, substr("getURL setreading [$dname:_lastStatus] \n$err",0,$dbg_strLen) if $debug;
+  readingsBulkUpdate($dhash, $dreading."_lastStatus", $err) if $err && $err ne "";
+
+  readingsEndUpdate($dhash, 1);
+  
+  if ($userExitFn) {
+    getURL_userExitFn($userExitFn, $dname, $dreading, $data, $cmd, $debug);
+  }
+  
+}
+
+
+# ------------------------------------------------------------------------------
+sub getURL_stripHtml($;$)
 {
   my ($data, $debug) = @_;
-  $data =~ s/<(?:[^>'"]*|(['"]).*?\1)*>//gs; # html
-  $data =~ s/(^\s+|\r|\n|\s+$)//g; # remove whitespaces and \n
-  Log 1, "getURL stripHtml: $data" if $debug;
+  
+  if (getURL_checkPM("HTML::Strip")) {
+    my $hs = HTML::Strip->new();
+    $data = $hs->parse($data);
+  }
+  else {
+    Log 1, "getURL stripHtml: Fallback to regexp mode." if $debug;
+    $data =~ s/<(?:[^>'"]*|(['"]).*?\1)*>//gs; # html
+#    $data =~ s/(^\s+|\r|\n|\s+$)//g; # remove whitespaces and \n
+    Log 1, "getURL stripHtml: $data" if $debug;
+  }
+  $data =~ s/(\s{2,}|\r|\n)/ /g; # replace \r\n with " "
+  $data =~ s/(^\s+|\s+$)//g;     # remove whitespaces
   return $data;
+
+#  $data =~ s/<script>.?<\/script>//g;
+#  $data =~ s!<script[^>]*>|.*</\s*script>!!gs;
+#  $data =~ s/(<!--).*(-->)//gs;
+#  $data =~ s/(^\s+|\r|\n|\s+$)//g; # remove whitespaces and \n
+#  Log 1, "getURL stripHtml: $data" if $debug;
+#  return $data;
 }
 
 
 # ------------------------------------------------------------------------------
-sub CommandGetURL_substitute($$$)
+sub getURL_substitute($$;$)
 {
   my ($data, $re, $debug) = @_;
-  my ($re2, $re3) = split(" ",$re);
+  my ($re2, $re3) = split(" ",$re,2);
   my $isPerl; 
 
   if (!defined $re2 || !defined $re3) {
@@ -256,13 +531,13 @@ sub CommandGetURL_substitute($$$)
     return undef;
   }
 
-  Log 1, "getURL substitute: $data" if $debug;
+  Log 1, "getURL substitute: " . ($data ? "\n".$data : "<undef>") if $debug;
   return $data;
 }
 
 
 # ------------------------------------------------------------------------------
-sub CommandGetURL_capture($$$)
+sub getURL_capture($$$)
 {
   my ($data, $re, $debug) = @_;
 #  return \$data if !defined $re || $re eq "";
@@ -296,7 +571,7 @@ sub CommandGetURL_capture($$$)
         $capture{$i} = substr($data, $-[$i], $+[$i] - $-[$i]);
       }
     }
-    CommandGetURL_LogDump("capture", \%capture, 1) if $debug;
+    Log 1, "getURL capture:\n". Dumper \%capture if $debug;
     return \%capture;
   }
   else { # match
@@ -307,45 +582,56 @@ sub CommandGetURL_capture($$$)
 
 
 # ------------------------------------------------------------------------------
-sub CommandGetURL_decodeJSON($$;$) {
+sub getURL_decodeJSON($$;$) {
   my ($dvalue, $findJSON, $debug) = @_;
+  $findJSON = 1 if !defined $findJSON;
 
   # global $data hash for user data is used.
-  if (!defined $data{getURL}{JSON} || $data{getURL}{JSON} == 0) {
-    eval "require JSON";
-    if($@) {
-      Log 1, "getURL decodeJSON: Can't load perl module JSON, please install it.";
-      Log 1, "getURL decodeJSON: ".$@ if !defined $data{getURL}{JSON};
-      $data{getURL}{JSON} = 0;
-    } 
-    else {
-      $data{getURL}{JSON} = 1;
-    }
-  }
-
-  if ($data{getURL}{JSON} == 1) {
-
-   $dvalue = $findJSON ? CommandGetURL_findJSON($dvalue, $debug) : $dvalue;
-
+  if (getURL_checkPM("JSON")) {
+    $dvalue = $findJSON ? getURL_findJSON($dvalue, $debug) : $dvalue;
     my $h;
     eval { $h = decode_json($dvalue); 1; };
     if ( $@ ) {
-      Log 2, "getURL decodeJSON: Malformed JSON: $dvalue";
-      Log 2, "getURL decodeJSON: $@";
+      Log 2, "getURL decodeJSON: Malformed JSON: " . ($dvalue ? "\n".$dvalue : "<undef>");
+      Log 2, "getURL decodeJSON: $@" if $dvalue;
+      return undef;
     }
     else  {
-      CommandGetURL_LogDump("decodeJSON", $h, 1) if $debug;
-      my $exp = CommandGetURL_expandJSON("",$h);
-      CommandGetURL_LogDump("expandJSON", $exp, 1) if $debug;
+      Log 1, "getURL decodeJSON:\n" . Dumper $h if $debug;
+      my $exp = getURL_expandJSON("",$h);
+      Log 1, "getURL expandJSON:\n" . Dumper $exp if $debug;
       return $exp;
     }
   }
-  return undef;
+  else {
+    Log 2, "getURL decodeJSON: WARNING: Perl module JSON missing. Install it or use capture groups.";
+    return undef;
+  }
 }
 
 
 # ------------------------------------------------------------------------------
-sub CommandGetURL_expandJSON($$;$$) {
+sub getURL_findJSON($;$) {
+  my ($data, $debug) = @_;
+  my $json;
+  # taken from: stackoverflow.com/questions/21994677/find-json-strings-in-a-string
+  my $pattern = '\{(?:[^{}]|(?R))*\}';
+  $data =~ m/($pattern)/x;
+  if ($1) {
+    $data = $1;
+    $data =~ s/\R//g; 
+#    $data =~ s/\s//g; 
+    Log 1, "getURL findJSON:\n".$data if $debug;
+    return $data;
+  }
+
+  Log 1, "getURL findJSON: <no JSON found>" if $debug;
+  return undef ;
+}
+
+
+# ------------------------------------------------------------------------------
+sub getURL_expandJSON($$;$$) {
   my ($sPrefix,$ref,$prefix,$suffix) = @_;
   $prefix = "" if( !$prefix );
   $suffix = "" if( !$suffix );
@@ -353,13 +639,13 @@ sub CommandGetURL_expandJSON($$;$$) {
 
   if( ref( $ref ) eq "ARRAY" ) {
     while( my ($key,$value) = each @{ $ref } ) {
-      CommandGetURL_expandJSON($sPrefix, $value, $prefix.sprintf("%02i",$key+1)."_");
+      getURL_expandJSON($sPrefix, $value, $prefix.sprintf("%02i",$key+1)."_");
     }
   }
   elsif( ref( $ref ) eq "HASH" ) {
     while( my ($key,$value) = each %{ $ref } ) {
       if( ref( $value ) ) {
-        CommandGetURL_expandJSON($sPrefix, $value, $prefix.$key.$suffix."_");
+        getURL_expandJSON($sPrefix, $value, $prefix.$key.$suffix."_");
       }
       else {
         my $reading = $sPrefix.$prefix.$key.$suffix;
@@ -370,116 +656,158 @@ sub CommandGetURL_expandJSON($$;$$) {
   return \%json;
 }
 
-# ------------------------------------------------------------------------------
-sub CommandGetURL_findJSON($;$) {
-  my ($data, $debug) = @_;
-  my $json;
-  # taken from: stackoverflow.com/questions/21994677/find-json-strings-in-a-string
-  my $pattern = '\{(?:[^{}]|(?R))*\}';
-  $data =~ m/($pattern)/x;
-  if ($1) {
-    $data = $1;
-    $data =~ s/\R//g; 
-    $data =~ s/\s//g; 
-    Log 1, "getURL findJSON: $data" if $debug;
-    return $data;
-  }
-
-  Log 1, "getURL findJSON: <no JSON found>" if $debug;
-  return undef ;
-}
-
 
 # ------------------------------------------------------------------------------
-sub CommandGetURL_updateReadings($$$;$)
+#getURL https://xxx.ddtlab.de [hd:testx1] --userFn={getURL_testFn($DATA, 10)}
+sub getURL_userFn($$;$)
 {
-  my ($dhash, $dreading, $data, $debug) = @_;
-  my $dname = $dhash->{NAME};
+  my ($data, $userFn, $debug) = @_;
+  my $DATA = $data;
   
-  if(defined($data)) {
-    # remove illegal letters from reading name
-    $dreading =~ s/[^A-Za-z\d_\.\-\/]/_/g;
-    readingsBeginUpdate($dhash);
+  my $ret = eval("$userFn");
+  if ($@) {
+    Log 1, "getURL Eval userFn: $userFn" if $debug;
+    Log 2, "getURL userFn ERROR: ".$@;
+  } 
+  else {
+    Log 1, "getURL userFn: " . ($ret ? "\n".$ret : "<undef>") if $debug;
+    return $ret;
+  }
+  return undef;
+}
 
-    if( ref($data) eq 'HASH' ) {
-      my $s = "_";
-      foreach my $key ( sort keys %{$data}) {
-        my $reading = $dreading.$s.$key;
 
-        # named capture groups
-        if (ref($data->{$key}) eq "HASH") {
-          foreach my $num (keys %{$data->{$key}}) {
-            # no numbering of singles values
-            my $r = (scalar keys $data->{$key} > 1) ? $reading.$s.$num 
-                                                    : $reading;
-            if (defined $data->{$key}{$num}) {
-              readingsBulkUpdate($dhash, $r, $data->{$key}{$num});
-              Log 1, "getURL setreading [$dname:$r] $data->{$key}{$num}" if $debug;
-            }
-            else {
-              if ($debug) {
-                Log 1, $dhash->{READINGS}{$r} 
-                  ? "getURL deletereading [$dname:$r]"
-                  : "getURL setreading [$dname:$r] 'undef' (skipped due to undefined value)";
-              }
-              CommandDeleteReading( undef, "$dname $r" );
-            }
-          }
-        }
+# ------------------------------------------------------------------------------
+sub getURL_userExitFn($$$$$;$) {
+  my ($userExitFn, $d, $r, $v, $cmd, $debug) = @_;
+  $debug = "" if !defined $debug;
+  
+  my %specials = ("%DEVICE" => "$d", "%NAME" => "$d", "%READING" => "$r", "%DATA" => "$v" , "%DEBUG" => "$debug");
+  $userExitFn = EvalSpecials($userExitFn, %specials);
 
-        # unnamed capture groups
-        else {
-          if ($data->{$key}) {
-            Log 1, "getURL setreading $dname ".$reading." ".$data->{$key} if $debug;
-            readingsBulkUpdate($dhash, $reading, $data->{$key});
-          }
-          else {
-            Log 1, "getURL deletereading [$dname:$reading] (due to undefined value)"
-              if $debug && $dhash->{READINGS}{$reading};
-            CommandDeleteReading( undef, "$dname $reading" );
-          }
-        }
-        
+  Log 1, "getURL: --userExitFn: exec $userExitFn" if $debug;
+  
+  my $err = AnalyzeCommandChain(undef,$userExitFn);
+  if ($err) {
+    Log 2, "getURL $cmd" if !$debug;
+    Log 2, "getURL --userExitFn: exec: $userExitFn" if !$debug;
+    Log 2, "getURL --userExitFn: $err";
+  }
+
+}
+
+
+# ------------------------------------------------------------------------------
+sub getURL_help($$) {
+  my ($hash, $cmdline) = @_;
+  my @p = split(" ", $cmdline);
+  my $cmd = $p[0];
+  my $opt = $p[1];
+  my $hat = "General syntax:\n"
+          . "getURL <url> [device:reading] <options>   - Request an URL\n"
+          . "getUrl help                               - Show this help\n"
+          . "getURL help <option>                      - Show help for an option\n"
+          . "- Note that [device:reading] and <options> are optional.\n"
+          . "- Use 'help getURL' for complete command reference.\n\n";
+  my $usg = "\n";
+  $usg = "\n".$hat if !defined $opt && !defined $getURL_opts->{$opt};
+  
+  if (!$opt || !$getURL_opts->{$opt}) {
+    $usg .= "Argument '$opt' is not a valid option.\n\n" if $opt;
+    $usg .= "Valid options are:\n";
+    my @helpOptsItems = sort keys %{ $getURL_opts };
+    $usg .= getURL_helpShowRows($helpOptsWidth, $helpOptsRows, @helpOptsItems);
+  }
+
+  elsif ($getURL_opts->{$opt})
+  {
+    $usg .= "$opt:\n\n";
+    my $optHlp = getURL_helpTopic($hash, $opt);
+    $usg .= $optHlp ? $optHlp : "Topic not found in commandref\n";
+  }
+
+  return $usg;
+}
+
+
+# ------------------------------------------------------------------------------
+sub getURL_helpTopic($$){
+  my ($hash, $label) = @_;
+  my ($err, @cmdRef);
+
+  return $cmdRef->{$label} if $cmdRef->{$label};
+
+  my $mpath = $attr{global}{modpath}."/FHEM/98_getURL.pm";
+  ($err, @cmdRef) = FileRead({FileName => $mpath, ForceType => 'file'});
+  if ($err) {
+    Log 2, "getURL Could no find $mpath.";
+    return undef;
+  }
+
+  my ($ret, $found);
+  foreach my $line (@cmdRef) {
+    if (!$found) {
+      if ($line =~ m/a name="getURL$label"/) {
+        $found = 1;
       }
+    } #!found
+    else {
+      last if $line =~ m'<!--topicEnd-->';
+      next if !$line;
+      $line =~ s'<a href="http.*">''g;
+      $ret .= $line =~ s/\s+//r;
+      $ret =~ s/<br>/\n/g;
+      $ret =~ s'<\/?[\w]+>''g;
+      $ret =~ s/&gt;/>/g;
+      $ret =~ s/&lt;/</g;
+      $ret =~ s/&nbsp;/ /g;
     }
+  } #foreach
+  return undef if !$ret;
 
-    elsif( ref($data) eq 'SCALAR') {
-      Log 1, "getURL setreading [$dname:$dreading] ${ $data }" if $debug;
-      readingsBulkUpdate($dhash, $dreading, ${ $data });
-    }
-    elsif( ref($data) eq '') {
-      Log 1, "getURL setreading [$dname:$dreading] $data" if $debug;
-      readingsBulkUpdate($dhash, $dreading, $data);
-    }
-    readingsEndUpdate($dhash, 1);
-  }
-
-  else { #defined $data
-    if (defined $dhash->{READINGS}{$dreading}) {
-      Log 1, "getURL deletereading [$dname:$dreading".".*]" if $debug;
-      CommandDeleteReading( undef, "$dname $dreading".".*" );
-    }
-  }
+  $cmdRef->{$label} = $ret;
+  return $ret ;
 }
 
 
 # ------------------------------------------------------------------------------
-sub CommandGetURL_LogDump($$$)
-{
-  my ($text, $refVar, $ll) = @_;;
-  my $Indent = $Data::Dumper::Indent; my $Terse = $Data::Dumper::Terse;
-  $Data::Dumper::Indent = 0; $Data::Dumper::Terse  = 1;
-  Log $ll, "getURL $text: " . Dumper $refVar;
-  $Data::Dumper::Indent = $Indent; $Data::Dumper::Terse = $Terse;
-
+sub getURL_helpShowRows($$@) {
+  my ($width, $rows, @strings) = @_;
+  my @ret;
+  my $i = 1;
+  foreach (@strings) {
+    push(@ret, ($i<$rows ? "$_ ".' 'x($width-length($_)) : "$_\n"));
+    $i++; $i=1 if($i > $rows);
+  }
+  return join("",@ret);
 }
 
 
 # ------------------------------------------------------------------------------
-sub CommandGetURL_paramCount($)
+sub getURL_checkPM($;$) {
+  my ($pm, $debug) = @_;
+  return 1 if defined $data{getURL}{$pm} && $data{getURL}{$pm};
+
+  eval "require $pm";
+  if($@) {
+    if (!defined $data{getURL}{$pm} || $debug) {
+      Log 1, "getURL Can't load perl module $pm, please install it.";
+      Log 1, "getURL $@";
+    }
+    $data{getURL}{$pm} = 0;
+    return 0;
+  }
+  $data{getURL}{$pm} = 1;
+  return 1;
+}
+
+
+# ------------------------------------------------------------------------------
+sub getURL_paramCount($)
 {
   return () = $_[0] =~ m'/'g  # count slashes in a string
 }
+
 
 1;
 
@@ -495,308 +823,536 @@ sub CommandGetURL_paramCount($)
 
   <code>getURL &lt;URL&gt; [&lt;device&gt;:&lt;reading&gt;] &lt;optional arguments&gt;</code><br>
   <br>
-  Request a http or https URL (non-blocking, asynchron)<br>
+  Request a HTTP(S) URL (non-blocking, asynchron)<br>
   Server respose can optionally be stored in a reading if you specify [&lt;device&gt;:&lt;reading&gt;]<br>
   <br>
 
-<li>
-  <u>Arguments:</u><br>
+  Arguments:<br>
+  <ul>
+    <li>&lt;URL&gt;
+    <ul>
+      URL to request, http:// and https:// URLs are supported at the moment.
+    </ul>
+    </li>
+<br>
+    <li>[&lt;device&gt;:&lt;reading&gt;]<br>
+    <ul>
+      Server response will be written into this reading.<br>
+    </ul>
+    </li>
+<br>    
+    <li>&lt;optional arguments&gt;<br>
+    <ul>
+      There are groups of optional arguments to:<br>
+        - <a href="#getURL_optModify">adopt server response (readings)</a><br>
+        - <a href="#getURL_optData">add data to requests</a><br>
+        - <a href="#getURL_optHeader">add HTTP headers</a><br>
+        - <a href="#getURL_optConfig">configure server requests</a><br>
+        - <a href="#getURL_optSSL">configure SSL/TLS methods</a><br>
+        - <a href="#getURL_optDebug">Debug</a><br>
+    </ul>
+    </li>
+    
+  </ul>
   <br>
-  <a name="">URL</a><br>
-  <ul>
-    URL to request, http:// and https:// URLs are supported at the moment.<br>
-  </ul><br>
 
-  <a name="">[&lt;device&gt;:&lt;reading&gt;]</a><br>
-  <ul>
-    If you want to write the server response into a reading than specify
-    [device:reading].<br>
-    This server response can be optionally manipulated with arguments: 
-    --stripHtml, --substitute. --capture, --decodeJSON to fit your needs. See below.<br>
-  </ul><br>
-</li>
+  Examples:<br>
+    <ul><li>
+      <code>getURL https://www.example.com/</code><br>
+    </ul></li>
+    <ul><li>
+      <code>getURL https://www.example.com/ [dev0:result]</code><br>
+    </ul></li>
+    <br>
+
+  Notes:<br>
+    <ul>
+    <li>
+      getUrl do not return a server response, directly.
+      The reason is that it is working non-blocking. A possible response from
+      server will be asynchron written into a reading of your choice. If you want
+      to further process this value you have to use --userExitFn option or you have
+      to define a notify (or DOIF) that triggers on the updated or changed value.
+    </li>
+    <li>
+      Use --debug or --debug=2 argument and have a look at FHEM's log file to
+      see requests and responses if something went wrong.
+    </li>
+    <li>
+      An online http(s) request inspect tool can be found
+      <a href="https://requestb.in/">here</a> to examine your command line
+      arguments if you don't have an own webserver to test with.
+    </li>
+    <li>
+      If a (set magic) device/reading combination is specified and an error
+      occured or the returned 
+      <a href ="https://en.wikipedia.org/wiki/List_of_HTTP_status_codes">
+      HTTP status code</a> comply with 4xx, 5xx or 9xx then the status it is 
+      written into a reading with suffix '_lastStatus'. 
+      If all response codes (also good once) should be written into this reading
+      then option '--status' must be applied.
+    </li>
+    </ul><br>
+<br>
 
 
 <li>
-  <u>Simple examples:</u><br>
-    <br>
-    <code>getURL https://www.example.com/cmd?control=gpio,14,1</code><br>
-    <code>getURL https://www.example.com/cmd?control=gpio,14,1 [dev0:result]</code><br>
-    <br>
-</li>
+  <u><a name="getURL_options">Optional arguments to adopt command behaviour:</a></u><br>
+  <br>
 
-<li>
-  <u>Notes/Tips/Debug:</u><br>
+    <a name="getURL--define">--define</a>
+    <ul>
+      Define destination device for reading(s) if not already exist.<br>
+      A dummy device will be defined/created if there is no accordingly device.<br>
+      Allowed values: none<br>
+      Default: disabled<br><br>
+      
+      Examples:<br>
+      <code>
+      # device 'dev' will be defined if not already defined to be able to write readings to.<br>
+      getURL https://www.example.com/getJSON [dev:reading] --define<br>
+      </code>
+    </ul>
+    <!--topicEnd-->
+
+    <a name="getURL--save">--save</a>
+    <ul>
+      Save FHEM configuration if a dummy was created.<br>
+      Allowed values: none<br>
+      Default: disabled<br><br>
+      
+      Examples:<br>
+      <code>
+      getURL https://www.example.com/getJSON [dev:reading] --define --save<br>
+      </code>
+    </ul>
+    <!--topicEnd-->
+
     <br>
-    - Use --debug=1 parameter and have a look at FHEM's log to debug cmd call.<br>
-    - A http(s) request inspect tool can be found here: <a href="https://requestb.in/">RequestBin</a><br>
-    - <a href="#getURL">getUrl</a> do not return a server response, directly.
-    The reason is that it is working non-blocking. A possible response from
-    server will be asynchron written into a reading of your choice. If you want
-    to process this value you have to define a notify (or DOIF) that triggers on
-    the value update or change.
+    <a name="getURL--force">--force</a>
+    <ul>
+      Force write of received data to reading(s) even if there is a http response code pointing out an error.<br>
+      Allowed values: none<br>
+      Default: disabled<br><br>
+      
+      Example:<br>
+      <code>
+      getURL https://www.example.com/doIt [dev:reading] --force    # enable<br>
+      </code>
+    </ul>
+    <!--topicEnd-->
+
     <br>
+    <a name="getURL--status">--status</a>
+    <ul>
+      Write http status code or error into specified reading with suffix '_lastStatus'.<br>
+      Allowed values: none<br>
+      Default: disabled<br><br>
+      
+      Example:<br>
+      <code>
+      getURL https://www.example.com/doIt [dev:reading] --status<br>
+      </code>
+    </ul>
+    <!--topicEnd-->
 </li><br>
-
-
-<li>
-  <u>Optional arguments to adopt server response:</u><br>
-     Used to filter server response befor writing into a reading.<br>
-     Multiple options can be used. They are processed in shown order.<br><br>
-
-    <a name="">--stripHtml</a>
-    <ul>
-     Strip HTML code from server response.<br>
-     Possible values: 0,1<br>
-     Default: 0<br>
-     Example: <code>getURL https://www.example.com/ stripHtml=1</code><br>
-    </ul><br>
-    
-    <a name="">--substitute</a><br>
-    <ul>
-    Replace (substitute) part of the server response. <br>
-     Possible values: "&lt;regex_to_search_for&gt; &lt;replace_with__or_{perl_expression}&gt;"<br>
-     Values must not contain a space.<br>
-     Possible
-     Default: none<br>
-     Example: <code>getURL https://www.example.com/ --substitute=""</code><br>
-    </ul><br>
-
-    <a name="">--capture</a><br>
-    <ul>
-     Used to extract values from servers response with the help of so called capturue groups.<br>
-     Possible values: regex with named or unnamed capture groups.<br>
-     For details see perldoc: <a href="http://perldoc.perl.org/perlrequick.html">perlrequick</a>
-     / <a href="https://perldoc.perl.org/perlre.html">perlre</a><br>
-     Default: none<br>
-     Examples with capture groups to extract a time string (eg. "time string 12:10:00 is given") into 3 different readings.<br>
-     <code>getURL https://www.example.com/ [device1:reading2] --capture=".*\s(\d\d):(\d\d):(\d\d).*"</code><br>
-     Destination readings are: reading1_1, reading1_2. reading1_3<br>
-     <code>getURL https://www.example.com/ [device1:reading2] --capture=".*\s(?&lt;hour&gt;\d+):(?&lt;min&gt;\d+):(?&lt;sec&gt;\d+).*"</code><br>
-     Destination readings are: reading1_hour, reading1_min. reading1_sec<br>
-    </ul><br>
-
-    <a name="">--decodeJSON</a><br>
-    <ul>
-    Decode a JSON string into readings. Only JSON objects are supported at the moment.
-    <br>
-     Possible values: 0,1<br>
-     Default: 0<br>
-     Example: <code>getURL https://www.example.com/getJSON --decodeJSON=1</code><br>
-    </ul><br>
-
-    <a name="">--findJSON</a><br>
-    <ul>
-    If the received JSON string is embedded in other text than you could try this option
-    to extract and process the JSON string.<br>
-     Possible values: 0,1<br>
-     Default: 0<br>
-     Example: <code>getURL https://www.example.com/otherJSON.txt --findJSON=1</code><br>
-    </ul><br>
-
-  <u>Examples:</u><br>
-    <br>
-    <code>getURL https://www.example.com/cmd --capture="^(.*):(.*):(.*)$"</code><br>
-    <code>getURL https://www.example.com/cmd --capture=".*(?&lt;hour&gt;\d\d):(?&lt;min&gt;\d\d):(?&lt;sec&gt;\d\d).*""</code><br>
-    <code>getURL https://www.example.com/cmd --stripHtml --capture="^(.*):(.*):(.*)$"</code><br>
-    <code>getURL https://www.example.com/cmd --substitute="abc 123"</code><br>
-    <code>getURL https://www.example.com/cmd --substitute=".*(TEST).* $1"</code><br>
-    <code>getURL https://www.example.com/cmd --substitute=".*(TEST).* {ReadingsVal("dev0","reading1","")}"</code><br>
-    <code>getURL https://www.example.com/cmd --findJSON=1</code><br>
-    <code>getURL https://www.example.com/cmd --substitute="abc 123"  --decodeJSON=1</code><br>
-    <br>
-
-
-</li><br>
-
-
-<li>
-  <u>Debugging option:</u><br><br>
-    <a name="">--debug</a>
-    <ul>
-     Debug server request and response processing<br>
-     0: disabled, 1: enable command logging, 2: enable command and HttpUtils Logging
-     Possible values: 0,1,2<br>
-     Default: 0<br>
-     Example: <code>getURL https://www.example.com/ debug=1</code><br>
-    </ul><br>
-    
-</li><br>
-
 
 
 <br>
 <li>
-<b>All following options are optional and intended for advanced users only.</b>
-</li><br>
+  <u><a name="getURL_optModify">Optional arguments to adopt server response:</a></u><br>
+  <br>
+     Used to filter/modify server response before it is written into a reading.<br>
+     Multiple options can be used. They are processed in shown order.<br><br>
+
+    <a name="getURL--capture">--capture</a>
+    <ul>
+      Used to extract values from servers response with the help of so called capturue groups.<br>
+      For details see perldoc: <a href="http://perldoc.perl.org/perlrequick.html">perlrequick</a>
+      &nbsp;/ <a href="https://perldoc.perl.org/perlre.html">perlre</a>. 
+      <a href="https://regex101.com/">regex101.com</a> may also be helpful.<br>
+      Note that options --capture and --json can not be used at the same time.<br>
+      Allowed value: regex with capture groups<br>
+      Default: none<br><br>
+      
+      Examples:<br>
+        <code>
+        # Unnamed capture groups to extract hour, min, sec from a string that contains<br>
+        # "12:01:00" into 3 different readings.<br>
+        # Destination readings are: time_1, time_2 and time_3<br>
+        getURL https://www.example.com/ [dev1:time] --capture=".*\s(\d\d):(\d\d):(\d\d).*"<br>
+        <br>
+        # A named capture groups to extract the same string as above.<br>
+        # Destination readings are: time_hour, time_min and time_sec<br>
+        getURL https://www.example.com/ [dev1:time] --capture=".*\s(?&lt;hour&gt;\d\d):(?&lt;min&gt;\d\d):(?&lt;sec&gt;\d\d).*"<br>
+        </code>
+    </ul>
+    <!--topicEnd-->
+
+    <br>
+    <a name="getURL--json">--json</a>
+    <ul>
+      Decode a JSON string into corresponding readings. Only JSON objects are supported at the moment.<br>
+      Note that options --capture and --json can not be used at the same time.<br>
+      Allowed values: none<br>
+      Default: disabled<br><br>
+      
+      Example:<br>
+      <code>
+      # decode a given JSON string into corresponding readings<br>
+      getURL https://www.example.com/getJSON [dev:reading] --json<br>
+      </code>
+    </ul>
+    <!--topicEnd-->
+
+    <br>
+    <a name="getURL--stripHtml">--stripHtml</a>
+    <ul>
+     Remove HTML code from server response.<br>
+     Perl module HTML::Strip must be installed for good results.
+     If it is not installed there is a fallback to a simple regexp mode.<br>
+     Missing module is only logged once or with option --debug=1<br>
+     Allowed values: none<br>
+     Default: disabled<br><br>
+
+     Example:<br>
+     <code>
+     getURL https://www.example.com/ [dev:reading] --stripHtml<br>
+     </code>
+    </ul>
+    <!--topicEnd-->
+    
+    <br>
+    <a name="getURL--substitute">--substitute</a>
+    <ul>
+     Replace part(s) of the server response. <br>
+     Allowed value: "&lt;toReplace&gt; &lt;replaceWith&gt;"<br>
+     &lt;toReplace&gt; is a regular expression. If &lt;replaceWith&gt; is enclosed in {},
+     then the content will be executed as a perl expression for each match.
+     &lt;toReplace&gt; must not contain a space.<br>
+     Default: none<br><br>
+     
+     Examples:<br>
+       <code>
+       # shorten server response "power 0.5 W previous: 0 delta_time: 300"<br>
+       # to just "power 0.5 W"<br>
+       getURL https://www.example.com/ --substitute="(.*W).* $1"<br>
+       <br>
+       # format each decimal number to 2 decimal places<br>
+       getURL https://www.example.com/ --substitute="(\d+\.\d+) {sprintf("%0.2f", $1)}"
+       </code>
+    </ul>
+    <!--topicEnd-->
+    
+    <br>
+    <a name="getURL--userFn">--userFn</a>
+    <ul>
+      Can be specified to use Perl code to modify received data.<br>
+      $DATA is used to hand over received data. $DATA is a scalar variable unless option 
+      --capture or --json is used. In this case $DATA is a hash reference. $DATA 
+      can be undefined if an previous --option returned an error or did not match. 
+      The returned value can be a scalar or a scalar/array/hash reference.<br>
+      If the returned value is undefined than the corresponding reading will be deleted.<br>
+      Allowed value: {Perl code}<br>
+      Default: none<br><br>
+
+      Examples:<br>
+      <code>
+      # use only the first 4 characters<br>
+      getURL https://www.example.com/test --userFn={substr($DATA,0,4)}<br>
+      <br>
+      # use an own sub, debug option is turned on.<br>
+      getURL https://www.example.com/test --userFn={my_getURL_testFn($DATA,4)} --debug=1<br>
+      </code>
+    </ul>
+    <!--topicEnd-->
+
+    <br>
+    <a name="getURL--userExitFn">--userExitFn</a>
+    <ul>
+      Used to call a FHEM command (chain) and/or perl code after server response is written into reading(s).<br>
+      Variables that can be used:<br>
+      $NAME, $READING, $DEBUG (type: scalar)<br>
+      $DATA (type depending on used filterFn: scalar/reference)<br>
+      If perl code is used then you have to return undef if no error occur.<br>
+      Allowed value: FHEM command(s) and/or perl code<br>
+      Default: none<br><br>
+
+      Examples:<br>
+      <code>
+      # toggle Device<br>
+      getURL https://xxx.ddtlab.de [dev:reading] --userExitFn="set $NAME toggle"<br>
+      <br>
+      # toggle Device and log variables<br>
+      getURL https://xxx.ddtlab.de [dev:reading] --debug 
+      --userExitFn='set $NAME toggle;;
+      {Log 1, "$NAME $READING $DATA $DEBUG" if $DEBUG}'<br>
+      <br>
+      # call sub function (in 99_myUtils.pm)<br>
+      getURL https://xxx.ddtlab.de [dev:reading] --userExitFn={mySub($NAME,$DATA)}<br>
+      </code>
+    </ul>
+    <!--topicEnd-->
+</li>
 
 
+<br><br>
 <li>
-  <u>Optional arguments to add data to POST requests:</u><br><br>
+  <u><a name="getURL_optData">Optional arguments to add data to POST requests:</a></u><br>
+  <br>
 
-    <a name="">--data</a>
+    <a name="getURL--data">--data</a>
     <ul>
-     Specify data for POST requests.<br>
-     HTTP POST Method is automatically selected. Can be overwritten with --method.<br>
-     Default: no data<br>
-     Example: <code>getURL https://www.example.com/ --data="Test data 1 2 3"</code><br>
-    </ul><br>
-
-    <a name="">--form-&lt;nameXXX&gt;</a>
+      Specify data to submit with request.<br>
+      HTTP POST Method is automatically selected, but can be overwritten with --method.<br>
+      Enclose data in quotes if data contain spaces.<br>
+      Allowed value: "any data to be send".<br>
+      Default: none<br><br>
+ 
+      Example:<br>
+      <code>
+      getURL https://www.example.com/ --data="Test data 1 2 3"<br>
+      </code>
+    </ul>
+    <!--topicEnd-->
+    
+    <br>
+    <a name="getURL--data-file">--data-file</a>
     <ul>
-     Specify data for formular POST requests, where &lt;nameXXX&gt; is the name of formular option<br>
-     Default: none<br>
-     Example: <code>getURL https://www.example.com/ --form-Test="abc"</code><br>
-     Example: <code>getURL https://www.example.com/ --form-Test1=abc --form-Test2="defghi"</code><br>
-    </ul><br>
-</li><br>
+      Specify a file to read data from to submit with request.<br>
+      If a path is specified then it must be relative to <a href="https://fhem.de/commandref.html#modpath">modpath</a>
+      (typically /opt/fhem)<br>
+      HTTP POST Method is automatically selected, but can be overwritten with --method.<br>
+      Allowed value: a filename relative to modpath.<br>
+      Default: none<br><br>
+      
+      Example:<br>
+      <code>
+      getURL https://www.example.com/ --data-file=mypostdata.txt<br>
+      </code>
+    </ul>
+    <!--topicEnd-->
+    
+    <br>
+    <a name="getURL--form_">--form_</a>
+    <ul>
+      Specify data for formular POST requests.
+      Can be used multiple times.<br>
+      Default: none<br><br>
+      
+      Examples:<br>
+      <code>
+      # add formular data "Test=abc" to request<br>
+      getURL https://www.example.com/form.php --form_Test="abc"</code><br>
+      <br>
+      # add formular data "Test1=abc&Test2=def" to request<br>
+      getURL https://www.example.com/form.php --form_Test1=abc --form_Test2="def"
+      </code>
+    </ul>
+    <!--topicEnd-->
+</li>
 
 
+<br><br>
 <li>
-  <u>Optional arguments to add HTTP header(s):</u><br><br>
+  <u><a name="getURL_optHeader">Optional arguments to add HTTP header(s):</a></u><br><br>
 
-    <a name="">--header</a>
+    <br>
+    <a name="getURLheader">header</a> (without leading --)
     <ul>
-     Used for own header lines Use \r\n so separate multiple headers.<br>
-     See also header arguments without leading -- below.<br>
-     Possible values: string<br>
-     Default: none<br>
-     Example: <code>getURL https://www.example.com/ --header="User-Agent: Mozilla/1.22"</code><br>
-     Example: <code>getURL https://www.example.com/ --header="User-Agent: Mozilla/1.22\r\nContent-Type: application/xml"</code><br>
-    </ul><br>
-
-     Any combination of <a name="">&lt;header&gt;=&lt;value&gt;</a> (without leading --) will add a HTTP request header.<br>
-     <ul>
+      Any combination of 'header=value' will add a HTTP request header.<br>
       Can be used multiples times.<br>
-      Example: <code>getURL https://www.example.com/ User-Agent=FHEM/5.8</code><br>
-      Example: <code>getURL https://www.example.com/ Header1=123 Header2="xyz"</code><br>
-    </ul><br>
-</li><br>
+      Allowed value: any header data<br>
+      Default: User-Agent=fhem<br><br>
+      
+      Examples:<br>
+      <code>
+      getURL https://www.example.com/ User-Agent=FHEM/5.8<br>
+      getURL https://www.example.com/ Header1=123 Header2="1 2 3"<br>
+      </code>
+    </ul>  
+    <!--topicEnd-->
 
-
-<li>
-  <u>Optional HttpUtils connection arguments:</u><br><br>
-  If &lt;value&gt; contains a space then it must be enclosed in quotes<br><br>
-  
-    <a name="">--timeout</a>
-    <ul>
-     Timeout for http(s) request.<br>
-     Possible values: &gt;0<br>
-     Default: 4<br>
-     Example: <code>getURL https://www.example.com/ --timeout=5</code><br>
-    </ul><br>
-
-    <a name="">--noshutdown</a>
-    <ul>
-     Set to "0" to implizit tell the server to shutdown the connection after this request.<br>
-     Possible values: 0,1<br>
-     Default: 1<br>
-     Example: <code>getURL https://www.example.com/ --noshutdown=1</code><br>
-    </ul><br>
-
-    <a name="">--loglevel</a>
-    <ul>
-     Set loglevel for under laying HttpUtils. Used for debugging. See also --debug argument.<br>
-     Possible values: 0,1<br>
-     Default: 4<br>
-     Example: <code>getURL https://www.example.com/ --loglevel=1</code><br>
-    </ul><br>
-
-    <a name="">--hideurl</a>
-    <ul>
-     Hide URLs in log entries. Useful if you hand over passwords in URLs.<br>
-     Possible values: 0,1<br>
-     Default: 0<br>
-     Example: <code>getURL https://www.example.com/ --hideurl=1</code><br>
-    </ul><br>
-
-    <a name="">--ignoreredirects</a>
-    <ul>
-     Redirects by the server will be ignored if set to 1. Useful to extract cockies from server request and reuse in next request.<br>
-     Possible values: 0,1<br>
-     Default: 0<br>
-     Example: <code>getURL https://www.example.com/ --ignoreredirects=1</code><br>
-    </ul><br>
-
-    <a name="">--method</a>
+    <br>
+    <a name="getURL--method">--method</a>
     <ul>
      HTTP method to use.<br>
-     Defaults: GET (without --data option), POST (with --data option)<br>
-     Example: <code>getURL https://www.example.com/ --method=POST --data="Testdata"</code><br>
-    </ul><br>
-
-    <a name="">--sslargs</a>
-    <ul>
-     Used to specify SSL/TLS parameters. Syntax is {option1 =&gt; value [,option2 =&gt; value]}.<br>
-     Options can be found here:
-     <a href="http://search.cpan.org/~sullr/IO-Socket-SSL-2.016/lib/IO/Socket/SSL.pod#Description_Of_Methods">IO::Socket::SSL</a><br>
-     Instead of using this argument with a hash syntax, it may be more easy to use <a href="#SSL">--SSL_xxx arguments</a>.
-     Default: FHEM system default for SSL_version will be used<br>
-     Note: FHEM system default for SSL_version can be set with global attribute
-     <a href="https://fhem.de/commandref.html#sslVersion">sslVersion</a><br>
-     Example: <code>getURL https://www.example.com/ --sslargs="{SSL_verify_mode => 0}"</code><br>
-     Example: <code>getURL https://www.example.com/ --sslargs="{SSL_verify_mode => 0, SSL_version => 'TLVv1_2'}"</code><br>
-    </ul><br>
-
-    <a name="">--httpversion</a>
+     Defaults: GET (without --data option), POST (with --data option)<br><br>
+     
+     Example:<br>
+     <code>
+     getURL https://www.example.com/ --method=POST --data="Testdata"<br>
+     </code>
+    </ul>
+    <!--topicEnd-->
+    
+    <br>
+    <a name="getURL--httpversion">--httpversion</a>
     <ul>
      Used to specify HTTP version for request.<br>
-     Possible values: 1.0 or 1.1<br>
-     Default: 1.0<br>
-     Example: <code>getURL https://www.example.com/ --httpversion=1.1</code><br>
-    </ul><br>
+     Allowed values: 1.0 or 1.1<br>
+     Default: 1.0<br><br>
+     
+     Example:<br>
+     <code>
+     getURL https://www.example.com/ --httpversion=1.1<br>
+     </code>
+    </ul>
+    <!--topicEnd-->
+</li>
 
-    <a name="">--digest</a>
+
+<br><br>
+<li>
+  <u><a name="getURL_optDebug">Log/debug options:</a></u><br><br>
+    <a name="getURL--debug">--debug</a>
+    <ul>
+     Debug server request and response processing.<br>
+     0: disabled, 1: enable command logging, 2: enable command and HttpUtils Logging
+     Allowed values: 0,1,2<br>
+     Default: 0<br><br>
+     
+     Examples:<br>
+     <code>
+     getURL https://www.example.com/ debug    # enable for getURL<br>
+     getURL https://www.example.com/ debug=1  # enbale for getURL<br>
+     getURL https://www.example.com/ debug=2  # enable for getURL/HttpUtils<br>
+     </code>
+    </ul>
+    <!--topicEnd-->
+
+    <br>
+    <a name="getURL--loglevel">--loglevel</a>
+    <ul>
+     Set loglevel for under laying HttpUtils. Used for debugging. See also --debug argument.<br>
+     Allowed values: 0..5<br>
+     Default: 4<br><br>
+     Example:<br>
+     <code>
+     getURL https://www.example.com/ --loglevel=1<br>
+     </code>
+    </ul>
+    <!--topicEnd-->
+    
+    <br>
+    <a name="getURL--hideurl">--hideurl</a>
+    <ul>
+     Hide URLs in log entries. Useful if you hand over passwords in URLs.<br>
+     Allowed values: none<br>
+     Default: disabled<br><br>
+     
+     Example:<br>
+     <code>
+     getURL https://www.example.com/ --hideurl=1<br>
+     </code>
+    </ul>
+    <!--topicEnd-->
+</li>
+
+
+<br><br>
+<li>
+  <u><a name="getURL_optConfig">Optional getURL/HttpUtils connection arguments:</a></u><br><br>
+  If &lt;value&gt; contains a space then it must be enclosed in quotes<br><br>
+  
+    <a name="getURL--timeout">--timeout</a>
+    <ul>
+     Timeout for http(s) request.<br>
+     Allowed values: &gt;0<br>
+     Default: 4<br><br>
+     
+     Example:<br>
+     <code>
+     getURL https://www.example.com/ --timeout=5<br>
+     </code>
+    </ul>
+    <!--topicEnd-->
+
+    <br>
+    <a name="getURL--noshutdown">--noshutdown</a>
+    <ul>
+     Set to "0" to implizit tell the server to shutdown the connection after this request.<br>
+     Allowed values: 0,1<br>
+     Default: 1<br><br>
+     
+     Example:
+     <code>getURL https://www.example.com/ --noshutdown=0<br>
+     </code>
+    </ul>
+    <!--topicEnd-->
+    
+    <br>
+    <a name="getURL--ignoreredirects">--ignoreredirects</a>
+    <ul>
+     Redirects by the server will be ignored if set. Useful to extract cockies from server request and reuse in next request.<br>
+     Allowed values: none<br>
+     Default: disabled<br><br>
+     
+     Example:<br>
+     <code>
+     getURL https://www.example.com/ --ignoreredirects<br>
+     </code>
+    </ul>
+    <!--topicEnd-->
+    
+    <br>
+    <a name="getURL--digest">--digest</a>
     <ul>
      Prevent sending authentication via Basic-Auth. Credentials will be send only after an explizit HTTP digest request.<br>
-     Possible values: 0,1<br>
-     Default: 0<br>
-     Example: <code>getURL https://user:passs@www.example.com/ --digest=1</code><br>
-    </ul><br>
-</li><br>
+     Allowed values: none<br>
+     Default: disabled<br><br>
+
+     Example:<br>
+     <code>getURL https://user:passs@www.example.com/ --digest<br>
+     </code>
+    </ul>
+    <!--topicEnd-->
+</li>
 
 
+<br><br>
 <li>
-  <u>Optional SSL connection methods:</u><br><br>
+  <u><a name="getURL_optSSL">Optional SSL connection methods:</a></u><br><br>
 
-    <a name="#SSL">--SSL_xxx</a>
+    <a name="getURL--SSL_">--SSL_</a>
     <ul>
      Used to specify SSL/TLS connection methods for request.<br>
      All IO::Socket::SSL methods are supported.<br>
-     Possible values: see: <a href="http://search.cpan.org/~sullr/IO-Socket-SSL-2.016/lib/IO/Socket/SSL.pod#Description_Of_Methods">IO::Socket::SSL</a><br>
-     Default: FHEM defaults<br>
-     Example: <code>getURL https://www.example.com/ --SSL_version="TLSv1_2"</code><br>
-     Example: <code>getURL https://www.example.com/ --SSL_verify_mode=0</code><br>
-     Example: <code>getURL https://www.example.com/ --SSL_cipher_list="ALL:!EXPORT:!LOW:!aNULL:!eNULL:!SSLv2"</code><br>
-     Example: <code>getURL https://www.example.com/ --SSL_fingerprint="SHA256:19n6fkdz0qqmowiBy6XEaA87EuG/jgWUr44ZSBhJl6Y"</code><br>
-    </ul><br>
+     Allowed values: see: <a href="http://search.cpan.org/~sullr/IO-Socket-SSL-2.016/lib/IO/Socket/SSL.pod#Description_Of_Methods">CPAN IO::Socket::SSL</a><br>
+     Default: FHEM defaults<br><br>
+     
+     Examples:<br>
+     <code>getURL https://www.example.com/ --SSL_version="TLSv1_2"<br>
+     getURL https://www.example.com/ --SSL_verify_mode=0<br>
+     getURL https://www.example.com/ --SSL_cipher_list="ALL:!EXPORT:!LOW:!aNULL:!eNULL:!SSLv2"<br>
+     getURL https://www.example.com/ --SSL_fingerprint="SHA256:19n6fkdz0qqmowiBy6XEaA87EuG/jgWUr44ZSBhJl6Y"<br>
+     </code>
+    </ul>
+    <!--topicEnd-->
+</li>
 
-</li><br>
 
-
+<br><br>
 <li>
-  <u>Advanced examples:</u><br><br>
+  <u>More examples:</u><br><br>
   
-    A simple POST request:<br>
-    <code>getURL https://www.example.com/cmd --data="gpio,14,1"</code><br><br>
+    # The simplest form:<br>
+    <code>getURL https://www.example.com/</code><br><br>
+  
+    # The simplest form but write server response into a reading<br>
+    <code>getURL https://www.example.com/ [dev:reading]</code><br><br>
+  
+    # A simple GET request (for ESPEasy):<br>
+    <code>getURL https://www.example.com/cmd?control=gpio,14,1</code><br><br>
+  
+    # A simple POST request:<br>
+    <code>getURL https://www.example.com/cmd --data="test,14,1"</code><br><br>
     
-    A simple POST request, server response will be written into reading "result" of device "dev1"<br>
-    <code>getURL https://www.example.com/cmd --data="gpio,14,1" [dev1:result]</code><br>
+    # A simple POST request, server response will be written into reading "result" of device "dev1"<br>
+    <code>getURL https://www.example.com/cmd [dev1:result] --data="test,14,1"</code><br><br>
 </li>
 
 </ul>
 
 =end html
-
-=begin html_DE
-
-<a name="getURL"></a>
-<h3>copy</h3>
-<ul>
-  <code>getURL &lt;url&gt; [get|post] [&lt;dependent arguments&gt;]</code><br>
-  <br>
-  Ruft eine url auf.
-  </ul>
-
-=end html_DE
 =cut
