@@ -8,42 +8,43 @@ use Data::Dumper;
 #use Text::Wrap;
 
 sub CommandGetURL($@);
-sub getURL_expandJSON($$;$$);
+sub getURL_parse_JSON__expand($$;$$);
 
-my $getURL_opts = {
-  '--define'          => { noParam => 1 },
-  '--force'           => { noParam => 1 },
-  '--status'          => { noParam => 1 },
-  '--capture'         => { noParam => 0 },
-  '--json'            => { noParam => 1 },
-  '--stripHtml'       => { noParam => 1 },
-  '--substitute'      => { noParam => 0 },
-  '--userFn'          => { noParam => 0 },
-  '--data'            => { noParam => 0 },
-  '--data-file'       => { noParam => 0 },
-  '--form_'           => { noParam => 0 },
-  '--method'          => { noParam => 0 },
-  '--httpversion'     => { noParam => 0 },
-  '--timeout'         => { noParam => 0 },
-  '--noshutdown'      => { noParam => 1 },
-  '--ignoreredirects' => { noParam => 1 },
-  '--digest'          => { noParam => 1 },
-  '--SSL_'            => { noParam => 0 },
-  '--debug'           => { noParam => 1 },
-  '--loglevel'        => { noParam => 0 },
-  '--hideurl'         => { noParam => 1 },
-  '--userExitFn'      => { noParam => 0 },
-  '--save'            => { noParam => 1 },
-  'header'            => { noParam => 0 }
+my $gu_opts = {
+  '--define'          => { noParam => 1, cat => "device/reading" },
+  '--force'           => { noParam => 1, cat => "device/reading" },
+  '--status'          => { noParam => 1, cat => "device/reading" },
+  '--save'            => { noParam => 1, cat => "device/reading" },
+  '--debug'           => { noParam => 1, cat => "logging" },
+  '--loglevel'        => { noParam => 0, cat => "logging" },
+  '--hideurl'         => { noParam => 1, cat => "logging" },
+  '--capture'         => { noParam => 0, cat => "adopt response" },
+  '--json'            => { noParam => 1, cat => "adopt response" },
+  '--stripHtml'       => { noParam => 1, cat => "adopt response" },
+  '--substitute'      => { noParam => 0, cat => "adopt response" },
+  '--userFn'          => { noParam => 0, cat => "adopt response" },
+  '--userExitFn'      => { noParam => 0, cat => "adopt response" },
+  '--data'            => { noParam => 0, cat => "post data" },
+  '--data-file'       => { noParam => 0, cat => "post data" },
+  '--form_'           => { noParam => 0, cat => "post data" },
+  'header'            => { noParam => 0, cat => "post data" },
+  '--method'          => { noParam => 0, cat => "connection" },
+  '--httpversion'     => { noParam => 0, cat => "connection" },
+  '--timeout'         => { noParam => 0, cat => "connection" },
+  '--noshutdown'      => { noParam => 1, cat => "connection" },
+  '--ignoreredirects' => { noParam => 1, cat => "connection" },
+  '--digest'          => { noParam => 1, cat => "connection" },
+  '--SSL_'            => { noParam => 0, cat => "connection" },
 };
 
-my %json;
-my $cmdRef;
+my %gu_json;                 # result of json_decode
+my @gu_cmdref;               # cached cmdref
 
-my $http_def_timeout  = 5;
-my $dbg_strLen        = 53;
-my $helpOptsRows      = 3;
-my $helpOptsWidth     = 20;
+my $gu_http_timeout  = 5;    # default http timeout
+my $gu_debugStrLen   = 53;   # cut debug log reading value length
+my $gu_helpOptsRows  = 3;    # options help: no of rows
+my $gu_helpOptsWidth = 20;   # options help: width of rows
+my $gu_crMaxAge      = 1800; # drop @gu_cmdref after x seconds of inactivity
 
 
 # ------------------------------------------------------------------------------
@@ -101,88 +102,6 @@ sub CommandGetURL($@)
 
 
 # ------------------------------------------------------------------------------
-sub getURL_httpReq($$)
-{
-  my ($hash, $opts) = @_;  # parseParams is used
-  my ($err, $param);
-  
-  # convert $opts to $params (format used by httpUtils)
-  ($err, $param) = getURL_analyzeArguments($hash, $opts);
-  return $err if $err;
-  return undef if !defined $param;
-
-  Log 1, "getURL: request data:\n$param->{data}" 
-    if ($param->{data} && $param->{debug});
-  $param->{loglevel} = 1 
-    if (!$param->{loglevel} && $param->{debug} && $param->{debug} == 2);
-
-  HttpUtils_NonblockingGet($param);
-}
-
-
-# ------------------------------------------------------------------------------
-sub getURL_httpParse($$$)
-{
-  my ($param, $err, $data) = @_;
-  my $hash  = $param->{hash};
-  my $name  = $hash->{NAME};
-  my $debug = $param->{debug};
-  my $d     = $param->{device};
-  my $r     = $param->{reading};
-  my $cmd   = $param->{cmd};
-  my $userExitFn = $param->{'userExitFn'};
-  
-  if($err ne "") {
-    $err = "ERROR: ".$err;
-    Log 2, "getURL $param->{cmd}" if !$debug;
-    Log 2, "getURL $err";
-  }
-
-  Log $debug ? 1 : 4, "getURL received data: ". ($data ? "\n$data" : "<undef>");
-  chomp $data;
-
-  if ($d && $r) {
-    $data = undef if $param->{code} && $param->{code} =~ m/^[459]\d\d$/ && !$param->{force};
-    if (defined $data) {
-      $data = getURL_stripHtml($data,$debug) if $param->{stripHtml};
-      if ($param->{code} && $param->{code} !~ m/^[459]\d\d$/) {
-        $data = getURL_substitute($data, $param->{substitute}, $debug)
-          if $param->{substitute};
-        if ($param->{capture}) {
-          # $data becomes a hash referece
-          $data = getURL_capture($data, $param->{capture}, $debug);
-        }
-        elsif ($param->{json}) {
-          # $data becomes a hash referece
-          $data = getURL_decodeJSON($data, $param->{findJSON} ,$debug);
-        }
-        if ($param->{userFn}) {
-          $data = getURL_userFn($data, $param->{userFn}, $debug);
-        }
-      } # $param->{code} !~ m/^[459]
-    } # defined $data
-  } # $d && $r
-
-  if ($param->{httpheader} && $param->{status}) {
-    $err = (split("\n",$param->{httpheader}))[0];    #eg. HTTP/1.1 404 not found
-    $err =~ s'^HTTP/\d(\.\d)?\s+'' if $err;          #eg. 404 not found
-  }
-  elsif (!$param->{status}) {
-    $err = undef;  # no status reading will be written
-  }
-
-  # break out of notify loop detection.
-  if ( $d && $r && ($data || $err) ) {
-    InternalTimer(
-      gettimeofday(),
-      sub(){ getURL_updateReadings($defs{$d}, $r, $data, $cmd, $userExitFn, $err, $debug) },
-      $hash
-    );
-  }
-}
-
-
-# ------------------------------------------------------------------------------
 sub getURL_parseParams($) {
   my ($cmd) = @_;
   my ($a, $opts) = parseParams($cmd);
@@ -212,14 +131,14 @@ sub getURL_parseParams($) {
       }
     }
     # check unknown arguments
-    elsif (!defined $getURL_opts->{$opt} && $opt =~ m/^--/) {
+    elsif (!defined $gu_opts->{$opt} && $opt =~ m/^--/) {
       $err  = "getURL Unknown argument '$opt'.";
       $info = "getURL help";
       last;
     }
-    # if argument == "--arg="
+    # if argument eq "--arg="
     elsif ($opts->{$opt} eq "") {
-      if (defined $getURL_opts->{$opt} && $getURL_opts->{$opt}{noParam} == 1) {
+      if (defined $gu_opts->{$opt} && $gu_opts->{$opt}{noParam} == 1) {
         $opts->{$opt} = 1;
       }
       # noParam == 0, a value must be specified
@@ -246,8 +165,8 @@ sub getURL_parseParams($) {
         $info = "getURL help $1";
         last;
       }
-      elsif (defined $getURL_opts->{$arg}) {
-        if ($getURL_opts->{"$arg"}{noParam} == 1) {
+      elsif (defined $gu_opts->{$arg}) {
+        if ($gu_opts->{"$arg"}{noParam} == 1) {
           $opts->{$arg} = 1;
         }
         else {
@@ -279,14 +198,55 @@ sub getURL_parseParams($) {
 
 
 # ------------------------------------------------------------------------------
-sub getURL_analyzeArguments($$) {
+sub getURL_parseSetMagic($$)
+{
+  my ($sm, $opts) = @_;
+  my ($d, $r, $err, $msg);
+
+  my $define = $opts->{'--define'};
+  my $save = $opts->{'--save'};
+
+  return (undef, $opts) if !$sm || $sm !~ m/^\[.*\]$/;
+
+  if ($sm && $sm =~ m/^\[(.+):([A-Za-z\d_\.\-\/]+)\]$/) {
+    $d = $1;
+    $r = $2;
+  
+    if(!IsDevice($d) && defined $define) {
+      $err = CommandDefine(undef, "$d dummy");
+      $err = "getURL Error while define dummy '$d': $err" if $err;
+      $msg = "getURL Dummy device '$d' successfully defined." if !$err;
+      if ($save) {
+        CommandSave(undef,undef);
+        $msg .= " Structural changes saved.";
+      }
+      Log 2, $msg;
+    }
+    elsif (!IsDevice($d)) {
+      $err = "getURL Device '$d' do not exist. Use option --define to create a dummy device.";
+    }
+  }
+  elsif ($sm) {
+    $err = "getURL Malformed device/reading combination '$sm', use [device:reading], allowed characters are: A-Za-z0-9._";
+  }
+
+  $opts->{'--device'}  = $d;
+  $opts->{'--reading'} = $r;
+
+  Log 2, $err if $err;
+  return ($err, $opts);
+}
+
+
+# ------------------------------------------------------------------------------
+sub getURL_processArguments($$) {
   my ($hash, $opts) = @_;
   my @header;
   # some defaults for NonblockingGet
   my $param;
   my $err;
   $param->{hash}     = $hash; #passthrough
-  $param->{timeout}  = $http_def_timeout;
+  $param->{timeout}  = $gu_http_timeout;
   $param->{callback} = \&getURL_httpParse;
 
   foreach (keys %{$opts}) {
@@ -334,141 +294,89 @@ return ($err, $param);
 
 
 # ------------------------------------------------------------------------------
-sub getURL_parseSetMagic($$)
+sub getURL_httpReq($$)
 {
-  my ($sm, $opts) = @_;
-  my ($d, $r, $err, $msg);
-
-  my $define = $opts->{'--define'};
-  my $save = $opts->{'--save'};
-
-  return (undef, $opts) if !$sm || $sm !~ m/^\[.*\]$/;
-
-  if ($sm && $sm =~ m/^\[(.+):([A-Za-z\d_\.\-\/]+)\]$/) {
-    $d = $1;
-    $r = $2;
+  my ($hash, $opts) = @_;  # parseParams is used
+  my ($err, $param);
   
-    if(!IsDevice($d) && defined $define) {
-      $err = CommandDefine(undef, "$d dummy");
-      $err = "getURL Error while define dummy '$d': $err" if $err;
-      $msg = "getURL Dummy device '$d' successfully defined." if !$err;
-      if ($save) {
-        CommandSave(undef,undef);
-        $msg .= " Structural changes saved.";
-      }
-      Log 2, $msg;
-    }
-    elsif (!IsDevice($d)) {
-      $err = "getURL Device '$d' do not exist. Use option --define to create a dummy device.";
-    }
-  }
-  elsif ($sm) {
-    $err = "getURL Malformed device/reading combination '$sm', use [device:reading], allowed characters are: A-Za-z0-9._";
-  }
+  # convert $opts to $params (format used by httpUtils)
+  ($err, $param) = getURL_processArguments($hash, $opts);
+  return $err if $err;
+  return undef if !defined $param;
 
-  $opts->{'--device'}  = $d;
-  $opts->{'--reading'} = $r;
+  Log 1, "getURL: request data:\n$param->{data}" 
+    if ($param->{data} && $param->{debug});
+  $param->{loglevel} = 1 
+    if (!$param->{loglevel} && $param->{debug} && $param->{debug} == 2);
 
-  Log 2, $err if $err;
-  return ($err, $opts);
+  HttpUtils_NonblockingGet($param);
 }
 
 
 # ------------------------------------------------------------------------------
-sub getURL_updateReadings($$$$$$;$)
+sub getURL_httpParse($$$)
 {
-  my ($dhash, $dreading, $data, $cmd, $userExitFn, $err, $debug) = @_;
-  my $dname = $dhash->{NAME};
-  readingsBeginUpdate($dhash);
-
-  if(defined($data)) {
-    # remove illegal letters from reading name
-    $dreading =~ s/[^A-Za-z\d_\.\-\/]/_/g;
-
-    if( ref($data) eq 'HASH' ) {
-      my $s = "_";
-      foreach my $key ( sort keys %{$data}) {
-        my $reading = $dreading.$s.$key;
-
-        # named capture groups
-        if (ref($data->{$key}) eq "HASH") {
-          foreach my $num (keys %{$data->{$key}}) {
-            # no numbering of singles values
-            my $r = (scalar keys $data->{$key} > 1) ? $reading.$s.$num 
-                                                    : $reading;
-            if (defined $data->{$key}{$num}) {
-              readingsBulkUpdate($dhash, $r, $data->{$key}{$num});
-              Log 1, substr("getURL setreading [$dname:$r] \n$data->{$key}{$num}",0,$dbg_strLen) if $debug;
-            }
-            else {
-              if ($debug) {
-                Log 1, $dhash->{READINGS}{$r} 
-                  ? "getURL deletereading [$dname:$r]"
-                  : "getURL setreading [$dname:$r] \n'undef' (skipped due to undefined value)";
-              }
-              CommandDeleteReading( undef, "$dname $r" );
-            }
-          }
-        }
-
-        # unnamed capture groups
-        else {
-          if ($data->{$key}) {
-            Log 1, "getURL setreading $dname \n".$reading." ".$data->{$key} if $debug;
-            readingsBulkUpdate($dhash, $reading, $data->{$key});
-          }
-          else {
-            Log 1, "getURL deletereading [$dname:$reading] (due to undefined value)"
-              if $debug && $dhash->{READINGS}{$reading};
-            CommandDeleteReading( undef, "$dname $reading" );
-          }
-        }
-        
-      }
-    } # hash ref
-
-    elsif( ref($data) eq 'ARRAY' ) {
-      my $i = 1;
-      foreach (@$data) {
-        readingsBulkUpdate($dhash, $dreading."-$i", $_);
-        $i++;
-      }
-    }
-
-    elsif( ref($data) eq 'SCALAR') {
-      Log 1, substr("getURL setreading [$dname:$dreading] \n${ $data }",0,$dbg_strLen) if $debug;
-      readingsBulkUpdate($dhash, $dreading, ${ $data });
-    }
-    elsif( ref($data) eq '') {
-      Log 1, substr("getURL setreading [$dname:$dreading] \n$data",0,$dbg_strLen) if $debug;
-      readingsBulkUpdate($dhash, $dreading, $data) if $data;
-    }
-
-  } # if defined $data
-
-  # delete reading(s)
-  else {
-    if (defined $dhash->{READINGS}{$dreading}) {
-      Log 1, "getURL deletereading [$dname:$dreading".".*]" if $debug;
-      CommandDeleteReading( undef, "$dname $dreading".".*" );
-    }
+  my ($param, $err, $data) = @_;
+  my $hash  = $param->{hash};
+  my $name  = $hash->{NAME};
+  my $debug = $param->{debug};
+  my $d     = $param->{device};
+  my $r     = $param->{reading};
+  my $cmd   = $param->{cmd};
+  my $userExitFn = $param->{'userExitFn'};
+  
+  if($err ne "") {
+    $err = "ERROR: ".$err;
+    Log 2, "getURL $param->{cmd}" if !$debug;
+    Log 2, "getURL $err";
   }
 
-  # add result reading if defined
-  Log 1, substr("getURL setreading [$dname:_lastStatus] \n$err",0,$dbg_strLen) if $debug;
-  readingsBulkUpdate($dhash, $dreading."_lastStatus", $err) if $err && $err ne "";
+  Log $debug ? 1 : 4, "getURL received data: ". ($data ? "\n$data" : "<undef>");
+  chomp $data;
 
-  readingsEndUpdate($dhash, 1);
-  
-  if ($userExitFn) {
-    getURL_userExitFn($userExitFn, $dname, $dreading, $data, $cmd, $debug);
+  if ($d && $r) {
+    $data = undef if $param->{code} && $param->{code} =~ m/^[459]\d\d$/ && !$param->{force};
+    if (defined $data) {
+      $data = getURL_parse_stripHtml($data,$debug) if $param->{stripHtml};
+      if ($param->{code} && $param->{code} !~ m/^[459]\d\d$/) {
+        $data = getURL_parse_substitute($data, $param->{substitute}, $debug)
+          if $param->{substitute};
+        if ($param->{capture}) {
+          # $data becomes a hash referece
+          $data = getURL_parse_capture($data, $param->{capture}, $debug);
+        }
+        elsif ($param->{json}) {
+          # $data becomes a hash referece
+          $data = getURL_parse_JSON($data, $param->{findJSON} ,$debug);
+        }
+        if ($param->{userFn}) {
+          $data = getURL_parse_userFn($data, $param->{userFn}, $debug);
+        }
+      } # $param->{code} !~ m/^[459]
+    } # defined $data
+  } # $d && $r
+
+  if ($param->{httpheader} && $param->{status}) {
+    $err = (split("\n",$param->{httpheader}))[0];    #eg. HTTP/1.1 404 not found
+    $err =~ s'^HTTP/\d(\.\d)?\s+'' if $err;          #eg. 404 not found
   }
-  
+  elsif (!$param->{status}) {
+    $err = undef;  # no status reading will be written
+  }
+
+  # break out of notify loop detection.
+  if ( $d && $r && ($data || $err) ) {
+    InternalTimer(
+      gettimeofday(),
+      sub(){ getURL_updateReadings($defs{$d}, $r, $data, $cmd, $userExitFn, $err, $debug) },
+      $hash
+    );
+  }
 }
 
 
 # ------------------------------------------------------------------------------
-sub getURL_stripHtml($;$)
+sub getURL_parse_stripHtml($;$)
 {
   my ($data, $debug) = @_;
   
@@ -496,7 +404,7 @@ sub getURL_stripHtml($;$)
 
 
 # ------------------------------------------------------------------------------
-sub getURL_substitute($$;$)
+sub getURL_parse_substitute($$;$)
 {
   my ($data, $re, $debug) = @_;
   my ($re2, $re3) = split(" ",$re,2);
@@ -530,14 +438,14 @@ sub getURL_substitute($$;$)
     Log 2, "getURL WARNING: Invalid regexp: $re2\n$@";
     return undef;
   }
-
   Log 1, "getURL substitute: " . ($data ? "\n".$data : "<undef>") if $debug;
+
   return $data;
 }
 
 
 # ------------------------------------------------------------------------------
-sub getURL_capture($$$)
+sub getURL_parse_capture($$$)
 {
   my ($data, $re, $debug) = @_;
 #  return \$data if !defined $re || $re eq "";
@@ -577,18 +485,19 @@ sub getURL_capture($$$)
   else { # match
     Log 2, "getURL no matching capture group for regexp: $re";
   }
+
   return undef;
 }
 
 
 # ------------------------------------------------------------------------------
-sub getURL_decodeJSON($$;$) {
+sub getURL_parse_JSON($$;$) {
   my ($dvalue, $findJSON, $debug) = @_;
   $findJSON = 1 if !defined $findJSON;
 
   # global $data hash for user data is used.
   if (getURL_checkPM("JSON")) {
-    $dvalue = $findJSON ? getURL_findJSON($dvalue, $debug) : $dvalue;
+    $dvalue = $findJSON ? getURL_parse_JSON__find($dvalue, $debug) : $dvalue;
     my $h;
     eval { $h = decode_json($dvalue); 1; };
     if ( $@ ) {
@@ -598,7 +507,7 @@ sub getURL_decodeJSON($$;$) {
     }
     else  {
       Log 1, "getURL decodeJSON:\n" . Dumper $h if $debug;
-      my $exp = getURL_expandJSON("",$h);
+      my $exp = getURL_parse_JSON__expand("",$h);
       Log 1, "getURL expandJSON:\n" . Dumper $exp if $debug;
       return $exp;
     }
@@ -611,7 +520,7 @@ sub getURL_decodeJSON($$;$) {
 
 
 # ------------------------------------------------------------------------------
-sub getURL_findJSON($;$) {
+sub getURL_parse_JSON__find($;$) {
   my ($data, $debug) = @_;
   my $json;
   # taken from: stackoverflow.com/questions/21994677/find-json-strings-in-a-string
@@ -631,7 +540,7 @@ sub getURL_findJSON($;$) {
 
 
 # ------------------------------------------------------------------------------
-sub getURL_expandJSON($$;$$) {
+sub getURL_parse_JSON__expand($$;$$) {
   my ($sPrefix,$ref,$prefix,$suffix) = @_;
   $prefix = "" if( !$prefix );
   $suffix = "" if( !$suffix );
@@ -639,27 +548,28 @@ sub getURL_expandJSON($$;$$) {
 
   if( ref( $ref ) eq "ARRAY" ) {
     while( my ($key,$value) = each @{ $ref } ) {
-      getURL_expandJSON($sPrefix, $value, $prefix.sprintf("%02i",$key+1)."_");
+      getURL_parse_JSON__expand($sPrefix, $value, $prefix.sprintf("%02i",$key+1)."_");
     }
   }
   elsif( ref( $ref ) eq "HASH" ) {
     while( my ($key,$value) = each %{ $ref } ) {
       if( ref( $value ) ) {
-        getURL_expandJSON($sPrefix, $value, $prefix.$key.$suffix."_");
+        getURL_parse_JSON__expand($sPrefix, $value, $prefix.$key.$suffix."_");
       }
       else {
         my $reading = $sPrefix.$prefix.$key.$suffix;
-        $json{$reading} = $value;
+        $gu_json{$reading} = $value;
       }
     }
   }
-  return \%json;
+
+  return \%gu_json;
 }
 
 
 # ------------------------------------------------------------------------------
 #getURL https://xxx.ddtlab.de [hd:testx1] --userFn={getURL_testFn($DATA, 10)}
-sub getURL_userFn($$;$)
+sub getURL_parse_userFn($$;$)
 {
   my ($data, $userFn, $debug) = @_;
   my $DATA = $data;
@@ -673,12 +583,105 @@ sub getURL_userFn($$;$)
     Log 1, "getURL userFn: " . ($ret ? "\n".$ret : "<undef>") if $debug;
     return $ret;
   }
+
   return undef;
 }
 
 
 # ------------------------------------------------------------------------------
-sub getURL_userExitFn($$$$$;$) {
+sub getURL_updateReadings($$$$$$;$)
+{
+  my ($dhash, $dreading, $data, $cmd, $userExitFn, $err, $debug) = @_;
+  my $dname = $dhash->{NAME};
+  readingsBeginUpdate($dhash);
+
+  if(defined($data)) {
+    # remove illegal letters from reading name
+    $dreading =~ s/[^A-Za-z\d_\.\-\/]/_/g;
+
+    if( ref($data) eq 'HASH' ) {
+      my $s = "_";
+      foreach my $key ( sort keys %{$data}) {
+        my $reading = $dreading.$s.$key;
+
+        # named capture groups
+        if (ref($data->{$key}) eq "HASH") {
+          foreach my $num (keys %{$data->{$key}}) {
+            # no numbering of singles values
+            my $r = (scalar keys $data->{$key} > 1) ? $reading.$s.$num 
+                                                    : $reading;
+            if (defined $data->{$key}{$num}) {
+              readingsBulkUpdate($dhash, $r, $data->{$key}{$num});
+              Log 1, substr("getURL setreading [$dname:$r] \n$data->{$key}{$num}",0,$gu_debugStrLen) if $debug;
+            }
+            else {
+              if ($debug) {
+                Log 1, $dhash->{READINGS}{$r} 
+                  ? "getURL deletereading [$dname:$r]"
+                  : "getURL setreading [$dname:$r] \n'undef' (skipped due to undefined value)";
+              }
+              CommandDeleteReading( undef, "$dname $r" );
+            }
+          }
+        }
+
+        # unnamed capture groups
+        else {
+          if ($data->{$key}) {
+            Log 1, "getURL setreading $dname \n".$reading." ".$data->{$key} if $debug;
+            readingsBulkUpdate($dhash, $reading, $data->{$key});
+          }
+          else {
+            Log 1, "getURL deletereading [$dname:$reading] (due to undefined value)"
+              if $debug && $dhash->{READINGS}{$reading};
+            CommandDeleteReading( undef, "$dname $reading" );
+          }
+        }
+        
+      }
+    } # hash ref
+
+    elsif( ref($data) eq 'ARRAY' ) {
+      my $i = 1;
+      foreach (@$data) {
+        readingsBulkUpdate($dhash, $dreading."-$i", $_);
+        $i++;
+      }
+    }
+
+    elsif( ref($data) eq 'SCALAR') {
+      Log 1, substr("getURL setreading [$dname:$dreading] \n${ $data }",0,$gu_debugStrLen) if $debug;
+      readingsBulkUpdate($dhash, $dreading, ${ $data });
+    }
+    elsif( ref($data) eq '') {
+      Log 1, substr("getURL setreading [$dname:$dreading] \n$data",0,$gu_debugStrLen) if $debug;
+      readingsBulkUpdate($dhash, $dreading, $data) if $data;
+    }
+
+  } # if defined $data
+
+  # delete reading(s)
+  else {
+    if (defined $dhash->{READINGS}{$dreading}) {
+      Log 1, "getURL deletereading [$dname:$dreading".".*]" if $debug;
+      CommandDeleteReading( undef, "$dname $dreading".".*" );
+    }
+  }
+
+  # add result reading if defined
+  Log 1, substr("getURL setreading [$dname:_lastStatus] \n$err",0,$gu_debugStrLen) if $debug;
+  readingsBulkUpdate($dhash, $dreading."_lastStatus", $err) if $err && $err ne "";
+
+  readingsEndUpdate($dhash, 1);
+  
+  if ($userExitFn) {
+    getURL_updateReadings_userExitFn($userExitFn, $dname, $dreading, $data, $cmd, $debug);
+  }
+}
+
+
+# ------------------------------------------------------------------------------
+sub getURL_updateReadings_userExitFn($$$$$;$) {
   my ($userExitFn, $d, $r, $v, $cmd, $debug) = @_;
   $debug = "" if !defined $debug;
   
@@ -693,7 +696,6 @@ sub getURL_userExitFn($$$$$;$) {
     Log 2, "getURL --userExitFn: exec: $userExitFn" if !$debug;
     Log 2, "getURL --userExitFn: $err";
   }
-
 }
 
 
@@ -710,19 +712,19 @@ sub getURL_help($$) {
           . "- Note that [device:reading] and <options> are optional.\n"
           . "- Use 'help getURL' for complete command reference.\n\n";
   my $usg = "\n";
-  $usg = "\n".$hat if !defined $opt && !defined $getURL_opts->{$opt};
+  $usg = "\n".$hat if !defined $opt || !defined $gu_opts->{$opt};
   
-  if (!$opt || !$getURL_opts->{$opt}) {
+  if (!$opt || !$gu_opts->{$opt}) {
     $usg .= "Argument '$opt' is not a valid option.\n\n" if $opt;
     $usg .= "Valid options are:\n";
-    my @helpOptsItems = sort keys %{ $getURL_opts };
-    $usg .= getURL_helpShowRows($helpOptsWidth, $helpOptsRows, @helpOptsItems);
+    my @helpOptsItems = sort keys %{ $gu_opts };
+    $usg .= getURL_help__joinRows($gu_helpOptsWidth, $gu_helpOptsRows, @helpOptsItems);
   }
 
-  elsif ($getURL_opts->{$opt})
+  elsif ($gu_opts->{$opt})
   {
     $usg .= "$opt:\n\n";
-    my $optHlp = getURL_helpTopic($hash, $opt);
+    my $optHlp = getURL_help__showTopic($hash, $opt);
     $usg .= $optHlp ? $optHlp : "Topic not found in commandref\n";
   }
 
@@ -731,21 +733,42 @@ sub getURL_help($$) {
 
 
 # ------------------------------------------------------------------------------
-sub getURL_helpTopic($$){
-  my ($hash, $label) = @_;
-  my ($err, @cmdRef);
-
-  return $cmdRef->{$label} if $cmdRef->{$label};
-
-  my $mpath = $attr{global}{modpath}."/FHEM/98_getURL.pm";
-  ($err, @cmdRef) = FileRead({FileName => $mpath, ForceType => 'file'});
-  if ($err) {
-    Log 2, "getURL Could no find $mpath.";
-    return undef;
+sub getURL_help__joinRows($$@) {
+  my ($width, $rows, @strings) = @_;
+  my @ret;
+  my $i = 1;
+  foreach (@strings) {
+    push(@ret, ($i<$rows ? "$_ ".' 'x($width - length($_)) : "$_\n"));
+    $i++;
+    $i=1 if($i > $rows);
   }
+  
+  return join("",@ret);
+}
 
-  my ($ret, $found);
-  foreach my $line (@cmdRef) {
+
+# ------------------------------------------------------------------------------
+sub getURL_help__showTopic($$){
+  my ($hash, $label) = @_;
+  my ($err, $ret);
+
+#  return $gu_cmdref->{$label} if $gu_cmdref->{$label};
+
+  my @c = caller;
+  my $mod = $attr{global}{modpath}.substr($c[1],1);
+ 
+ if (!@gu_cmdref) {
+    if (!getURL_help__readCmdref($mod)) {
+      Log 2, "getURL Could not find $mod.";
+      return undef;
+    }
+  }
+  # drop @gu_cmdref after $gu_crMaxAge seconds of inactivity
+  RemoveInternalTimer($hash);
+  InternalTimer( gettimeofday()+$gu_crMaxAge, sub(){ @gu_cmdref = (); }, $hash );
+
+  my $found;
+  foreach my $line (@gu_cmdref) {
     if (!$found) {
       if ($line =~ m/a name="getURL$label"/) {
         $found = 1;
@@ -765,21 +788,37 @@ sub getURL_helpTopic($$){
   } #foreach
   return undef if !$ret;
 
-  $cmdRef->{$label} = $ret;
+#  $gu_cmdref->{$label} = $ret;
   return $ret ;
 }
 
 
 # ------------------------------------------------------------------------------
-sub getURL_helpShowRows($$@) {
-  my ($width, $rows, @strings) = @_;
-  my @ret;
-  my $i = 1;
-  foreach (@strings) {
-    push(@ret, ($i<$rows ? "$_ ".' 'x($width-length($_)) : "$_\n"));
-    $i++; $i=1 if($i > $rows);
+sub getURL_help__readCmdref(@)
+{
+  my ($file) = @_;
+#  my @cmdref;
+  my $err;
+  
+  if(open(FH, $file)) {
+    my $found;
+    while( my $line = <FH>)  {   
+      if ($found) {
+        last if $line =~ m/^\=end html/;
+        push(@gu_cmdref, $line);
+      }
+      else {
+        $found = 1 if $line =~ m/^\=begin html/;
+        next;
+      }
+    }
+    close(FH);
+    chomp(@gu_cmdref);
   }
-  return join("",@ret);
+  else {
+    $err = "getURL Can't open $file: $!";  
+  }
+  return ($err, @gu_cmdref);
 }
 
 
@@ -821,27 +860,35 @@ sub getURL_paramCount($)
 <h3>getURL</h3>
 <ul>
 
-  <code>getURL &lt;URL&gt; [&lt;device&gt;:&lt;reading&gt;] &lt;optional arguments&gt;</code><br>
-  <br>
   Request a HTTP(S) URL (non-blocking, asynchron)<br>
-  Server respose can optionally be stored in a reading if you specify [&lt;device&gt;:&lt;reading&gt;]<br>
+  Server response can optionally be stored in a reading if you specify [device:reading]<br>
+  Optional arguments are described below.<br>
+  <br>
+
+  <code>
+  <b>getURL URL</b><br>
+  <b>getURL URL [device:reading]</b><br>
+  <b>getURL URL --option</b><br>
+  <b>getURL URL [device:reading] --option</b><br>
+  </code>
   <br>
 
   Arguments:<br>
   <ul>
-    <li>&lt;URL&gt;
+    <li><b>URL</b>
     <ul>
-      URL to request, http:// and https:// URLs are supported at the moment.
+      URL to request, http:// and https:// URLs are supported at the moment.<br>
+      eg. https://example.com/<br>
     </ul>
     </li>
 <br>
-    <li>[&lt;device&gt;:&lt;reading&gt;]<br>
+    <li><b>[device:reading]</b><br>
     <ul>
-      Server response will be written into this reading.<br>
+      Server response will be written into this reading if specified. Can be omitted.<br>
     </ul>
     </li>
 <br>    
-    <li>&lt;optional arguments&gt;<br>
+    <li><b>--option</b><br>
     <ul>
       There are groups of optional arguments to:<br>
         - <a href="#getURL_optModify">adopt server response (readings)</a><br>
@@ -849,7 +896,7 @@ sub getURL_paramCount($)
         - <a href="#getURL_optHeader">add HTTP headers</a><br>
         - <a href="#getURL_optConfig">configure server requests</a><br>
         - <a href="#getURL_optSSL">configure SSL/TLS methods</a><br>
-        - <a href="#getURL_optDebug">Debug</a><br>
+        - <a href="#getURL_optDebug">Debug/Log</a><br>
     </ul>
     </li>
     
@@ -857,13 +904,34 @@ sub getURL_paramCount($)
   <br>
 
   Examples:<br>
-    <ul><li>
-      <code>getURL https://www.example.com/</code><br>
-    </ul></li>
-    <ul><li>
-      <code>getURL https://www.example.com/ [dev0:result]</code><br>
-    </ul></li>
+    <ul>
+      <li>
+        <code>getURL https://www.example.com/</code><br>
+      </li>
+      <li>
+        <code>getURL https://www.example.com/ [dev0:result]</code><br>
+      </li>
+      <li>
+        <code>getURL https://www.example.com/ --status --force </code><br>
+      </li>
+      <li>
+        <code>getURL https://www.example.com/ [dev:rXXX] --status --force --define</code><br>
+      </li>
+      <li>
+        <code>getURL https://www.example.com/ [dev:rYYY] --httpversion=1.1 --SSL_version=SSLv23:!SSLv3:!SSLv2</code><br>
+      </li>
+    </ul>
     <br>
+
+  <br>
+  Syntax help and help for options is also available:<br>
+  <br>
+  <code>
+  <b>getURL help</b><br>
+  <b>getURL help --option</b><br>
+  </code>
+<br><br>
+
 
   Notes:<br>
     <ul>
@@ -890,14 +958,14 @@ sub getURL_paramCount($)
       HTTP status code</a> comply with 4xx, 5xx or 9xx then the status it is 
       written into a reading with suffix '_lastStatus'. 
       If all response codes (also good once) should be written into this reading
-      then option '--status' must be applied.
+      then option '--status' must be applied. See below.
     </li>
     </ul><br>
 <br>
 
 
 <li>
-  <u><a name="getURL_options">Optional arguments to adopt command behaviour:</a></u><br>
+  <a name="getURL_options"><u>Optional arguments to adopt command behaviour:</u></a><br>
   <br>
 
     <a name="getURL--define">--define</a>
@@ -1208,7 +1276,7 @@ sub getURL_paramCount($)
     <a name="getURL--debug">--debug</a>
     <ul>
      Debug server request and response processing.<br>
-     0: disabled, 1: enable command logging, 2: enable command and HttpUtils Logging
+     0: disabled, 1: enable command logging, 2: enable command and HttpUtils Logging<br>
      Allowed values: 0,1,2<br>
      Default: 0<br><br>
      
