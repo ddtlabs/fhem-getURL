@@ -1,202 +1,566 @@
-getURL
+<html>
+<body>
+<h3>getURL</h3>
 
-    getURL <URL> [<device>:<reading>] <optional arguments>
 
-    Request a http or https URL (non-blocking, asynchron)
-    Server respose can optionally be stored in a reading if you specify [<device>:<reading>]
+  Request a HTTP(S) URL (non-blocking, asynchron)
+  Server response can optionally be stored in a reading if you specify [device:reading]
+  Optional arguments are described below.
+  
 
-    Arguments:
+  
+  getURL URL
+  getURL URL [device:reading]
+  getURL URL --option
+  getURL URL [device:reading] --option
+  
+  
 
+  Arguments:
+  
     URL
-        URL to request, http:// and https:// URLs are supported at the moment.
+    
+      URL to request, http:// and https:// URLs are supported at the moment.
+      eg. https://example.com/
+    
+    
 
-    [<device>:<reading>]
-        If you want to write the server response into a reading than specify [device:reading].
-        This server response can be optionally manipulated with arguments: --stripHtml, --substitute. --capture, --decodeJSON to fit your needs. See below.
+    [device:reading]
+    
+      Server response will be written into this reading if specified. Can be omitted.
+    
+    
+    
+    --option
+    
+      There are groups of optional arguments to:
+        - adopt server response (readings)
+        - add data to requests
+        - add HTTP headers
+        - configure server requests
+        - configure SSL/TLS methods
+        - Debug/Log
+    
+    
+    
+  
+  
 
-    Simple examples:
+  Examples:
+    
+      
+        getURL https://www.example.com/
+      
+      
+        getURL https://www.example.com/ [dev0:result]
+      
+      
+        getURL https://www.example.com/ --status --force 
+      
+      
+        getURL https://www.example.com/ [dev:rXXX] --status --force --define
+      
+      
+        getURL https://www.example.com/ [dev:rYYY] --httpversion=1.1 --SSL_version=SSLv23:!SSLv3:!SSLv2
+      
+    
+    
 
-    getURL https://www.example.com/cmd?control=gpio,14,1
-    getURL https://www.example.com/cmd?control=gpio,14,1 [dev0:result]
+  
+  Syntax help and help for options is also available:
+  
+  
+  getURL help
+  getURL help --option
+  
 
-    Notes/Tips/Debug:
 
-    - Use --debug=1 parameter and have a look at FHEM's log to debug cmd call.
-    - A http(s) request inspect tool can be found here: RequestBin
-    - getUrl do not return a server response, directly. The reason is that it is working non-blocking. A possible response from server will be asynchron written into a reading of your choice. If you want to process this value you have to define a notify (or DOIF) that triggers on the value update or change.
 
-    Optional arguments to adopt server response:
-    Used to filter server response befor writing into a reading.
-    Multiple options can be used. They are processed in shown order.
+  Notes:
+    
+    
+      getUrl do not return a server response, directly.
+      The reason is that it is working non-blocking. A possible response from
+      server will be asynchron written into a reading of your choice. If you want
+      to further process this value you have to use --userExitFn option or you have
+      to define a notify (or DOIF) that triggers on the updated or changed value.
+    
+    
+      Use --debug or --debug=2 argument and have a look at FHEM's log file to
+      see requests and responses if something went wrong.
+    
+    
+      An online http(s) request inspect tool can be found
+      here to examine your command line
+      arguments if you don't have an own webserver to test with.
+    
+    
+      If a (set magic) device/reading combination is specified and an error
+      occured or the returned HTTP status code comply with 4xx, 5xx or 9xx then the status it is 
+      written into a reading with suffix '_lastStatus'. 
+      If all response codes (also good once) should be written into this reading
+      then option '--status' must be applied. See below.
+    
+    
 
-    --stripHtml
-        Strip HTML code from server response.
-        Possible values: 0,1
-        Default: 0
-        Example: getURL https://www.example.com/ stripHtml=1
 
-    --substitute
-        Replace (substitute) part of the server response.
-        Possible values: "<regex_to_search_for> <replace_with__or_{perl_expression}>"
-        Values must not contain a space.
-        Possible Default: none
-        Example: getURL https://www.example.com/ --substitute=""
+
+
+  <u>Optional arguments to adopt command behaviour:</u>
+  
+
+    --define
+    
+      Define destination device for reading(s) if not already exist.
+      A dummy device will be defined/created if there is no accordingly device.
+      Allowed values: none
+      Default: disabled
+      
+      Examples:
+      
+      # device 'dev' will be defined if not already defined to be able to write readings to.
+      getURL https://www.example.com/getJSON [dev:reading] --define
+      
+    
+    
+
+    --save
+    
+      Save FHEM configuration if a dummy was created.
+      Allowed values: none
+      Default: disabled
+      
+      Examples:
+      
+      getURL https://www.example.com/getJSON [dev:reading] --define --save
+      
+    
+    
+
+    
+    --force
+    
+      Force write of received data to reading(s) even if there is a http response code pointing out an error.
+      Allowed values: none
+      Default: disabled
+      
+      Example:
+      
+      getURL https://www.example.com/doIt [dev:reading] --force    # enable
+      
+    
+    
+
+    
+    --status
+    
+      Write http status code or error into specified reading with suffix '_lastStatus'.
+      Allowed values: none
+      Default: disabled
+      
+      Example:
+      
+      getURL https://www.example.com/doIt [dev:reading] --status
+      
+    
+    
+
+
+
+
+
+  <u>Optional arguments to adopt server response:</u>
+  
+     Used to filter/modify server response before it is written into a reading.
+     Multiple options can be used. They are processed in shown order.
 
     --capture
-        Used to extract values from servers response with the help of so called capturue groups.
-        Possible values: regex with named or unnamed capture groups.
-        For details see perldoc: perlrequick / perlre
-        Default: none
-        Examples with capture groups to extract a time string (eg. "time string 12:10:00 is given") into 3 different readings.
-        getURL https://www.example.com/ [device1:reading2] --capture=".*\s(\d\d):(\d\d):(\d\d).*"
-        Destination readings are: reading1_1, reading1_2. reading1_3
-        getURL https://www.example.com/ [device1:reading2] --capture=".*\s(?<hour>\d+):(?<min>\d+):(?<sec>\d+).*"
-        Destination readings are: reading1_hour, reading1_min. reading1_sec
+    
+      Used to extract values from servers response with the help of so called capturue groups.
+      For details see perldoc: perlrequick
+      &nbsp;/ perlre. 
+      regex101.com may also be helpful.
+      Note that options --capture and --json can not be used at the same time.
+      Allowed value: regex with capture groups
+      Default: none
+      
+      Examples:
+        
+        # Unnamed capture groups to extract hour, min, sec from a string that contains
+        # "12:01:00" into 3 different readings.
+        # Destination readings are: time_1, time_2 and time_3
+        getURL https://www.example.com/ [dev1:time] --capture=".*\s(\d\d):(\d\d):(\d\d).*"
+        
+        # A named capture groups to extract the same string as above.
+        # Destination readings are: time_hour, time_min and time_sec
+        getURL https://www.example.com/ [dev1:time] --capture=".*\s(?&lt;hour&gt;\d\d):(?&lt;min&gt;\d\d):(?&lt;sec&gt;\d\d).*"
+        
+    
+    
 
-    --decodeJSON
-        Decode a JSON string into readings. Only JSON objects are supported at the moment.
-        Possible values: 0,1
-        Default: 0
-        Example: getURL https://www.example.com/getJSON --decodeJSON=1
+    
+    --json
+    
+      Decode a JSON string into corresponding readings. Only JSON objects are supported at the moment.
+      Note that options --capture and --json can not be used at the same time.
+      Allowed values: none
+      Default: disabled
+      
+      Example:
+      
+      # decode a given JSON string into corresponding readings
+      getURL https://www.example.com/getJSON [dev:reading] --json
+      
+    
+    
 
-    --findJSON
-        If the received JSON string is embedded in other text than you could try this option to extract and process the JSON string.
-        Possible values: 0,1
-        Default: 0
-        Example: getURL https://www.example.com/otherJSON.txt --findJSON=1
+    
+    --stripHtml
+    
+     Remove HTML code from server response.
+     Perl module HTML::Strip must be installed for good results.
+     If it is not installed there is a fallback to a simple regexp mode.
+     Missing module is only logged once or with option --debug=1
+     Allowed values: none
+     Default: disabled
 
-    Examples:
+     Example:
+     
+     getURL https://www.example.com/ [dev:reading] --stripHtml
+     
+    
+    
+    
+    
+    --substitute
+    
+     Replace part(s) of the server response. 
+     Allowed value: "&lt;toReplace&gt; &lt;replaceWith&gt;"
+     &lt;toReplace&gt; is a regular expression. If &lt;replaceWith&gt; is enclosed in {},
+     then the content will be executed as a perl expression for each match.
+     &lt;toReplace&gt; must not contain a space.
+     Default: none
+     
+     Examples:
+       
+       # shorten server response "power 0.5 W previous: 0 delta_time: 300"
+       # to just "power 0.5 W"
+       getURL https://www.example.com/ --substitute="(.*W).* $1"
+       
+       # format each decimal number to 2 decimal places
+       getURL https://www.example.com/ --substitute="(\d+\.\d+) {sprintf("%0.2f", $1)}"
+       
+    
+    
+    
+    
+    --userFn
+    
+      Can be specified to use Perl code to modify received data.
+      $DATA is used to hand over received data. $DATA is a scalar variable unless option 
+      --capture or --json is used. In this case $DATA is a hash reference. $DATA 
+      can be undefined if an previous --option returned an error or did not match. 
+      The returned value can be a scalar or a scalar/array/hash reference.
+      If the returned value is undefined than the corresponding reading will be deleted.
+      Allowed value: {Perl code}
+      Default: none
 
-    getURL https://www.example.com/cmd --capture="^(.*):(.*):(.*)$"
-    getURL https://www.example.com/cmd --capture=".*(?<hour>\d\d):(?<min>\d\d):(?<sec>\d\d).*""
-    getURL https://www.example.com/cmd --stripHtml --capture="^(.*):(.*):(.*)$"
-    getURL https://www.example.com/cmd --substitute="abc 123"
-    getURL https://www.example.com/cmd --substitute=".*(TEST).* $1"
-    getURL https://www.example.com/cmd --substitute=".*(TEST).* {ReadingsVal("dev0","reading1","")}"
-    getURL https://www.example.com/cmd --findJSON=1
-    getURL https://www.example.com/cmd --substitute="abc 123" --decodeJSON=1
+      Examples:
+      
+      # use only the first 4 characters
+      getURL https://www.example.com/test --userFn={substr($DATA,0,4)}
+      
+      # use an own sub, debug option is turned on.
+      getURL https://www.example.com/test --userFn={my_getURL_testFn($DATA,4)} --debug=1
+      
+    
+    
+
+    
+    --userExitFn
+    
+      Used to call a FHEM command (chain) and/or perl code after server response is written into reading(s).
+      Variables that can be used:
+      $NAME, $READING, $DEBUG (type: scalar)
+      $DATA (type depending on used filterFn: scalar/reference)
+      If perl code is used then you have to return undef if no error occur.
+      Allowed value: FHEM command(s) and/or perl code
+      Default: none
+
+      Examples:
+      
+      # toggle Device
+      getURL https://xxx.ddtlab.de [dev:reading] --userExitFn="set $NAME toggle"
+      
+      # toggle Device and log variables
+      getURL https://xxx.ddtlab.de [dev:reading] --debug 
+      --userExitFn='set $NAME toggle;;
+      {Log 1, "$NAME $READING $DATA $DEBUG" if $DEBUG}'
+      
+      # call sub function (in 99_myUtils.pm)
+      getURL https://xxx.ddtlab.de [dev:reading] --userExitFn={mySub($NAME,$DATA)}
+      
+    
+    
 
 
-    Debugging option:
-
-    --debug
-        Debug server request and response processing
-        0: disabled, 1: enable command logging, 2: enable command and HttpUtils Logging Possible values: 0,1,2
-        Default: 0
-        Example: getURL https://www.example.com/ debug=1
 
 
 
-    All following options are optional and intended for advanced users only.
-
-    Optional arguments to add data to POST requests:
+  <u>Optional arguments to add data to POST requests:</u>
+  
 
     --data
-        Specify data for POST requests.
-        HTTP POST Method is automatically selected. Can be overwritten with --method.
-        Default: no data
-        Example: getURL https://www.example.com/ --data="Test data 1 2 3"
+    
+      Specify data to submit with request.
+      HTTP POST Method is automatically selected, but can be overwritten with --method.
+      Enclose data in quotes if data contain spaces.
+      Allowed value: "any data to be send".
+      Default: none
+ 
+      Example:
+      
+      getURL https://www.example.com/ --data="Test data 1 2 3"
+      
+    
+    
+    
+    
+    --data-file
+    
+      Specify a file to read data from to submit with request.
+      If a path is specified then it must be relative to modpath
+      (typically /opt/fhem)
+      HTTP POST Method is automatically selected, but can be overwritten with --method.
+      Allowed value: a filename relative to modpath.
+      Default: none
+      
+      Example:
+      
+      getURL https://www.example.com/ --data-file=mypostdata.txt
+      
+    
+    
+    
+    
+    --form_
+    
+      Specify data for formular POST requests.
+      Can be used multiple times.
+      Default: none
+      
+      Examples:
+      
+      # add formular data "Test=abc" to request
+      getURL https://www.example.com/form.php --form_Test="abc"
+      
+      # add formular data "Test1=abc&Test2=def" to request
+      getURL https://www.example.com/form.php --form_Test1=abc --form_Test2="def"
+      
+    
+    
 
-    --form-<nameXXX>
-        Specify data for formular POST requests, where <nameXXX> is the name of formular option
-        Default: none
-        Example: getURL https://www.example.com/ --form-Test="abc"
-        Example: getURL https://www.example.com/ --form-Test1=abc --form-Test2="defghi"
 
 
-    Optional arguments to add HTTP header(s):
-
-    --header
-        Used for own header lines Use \r\n so separate multiple headers.
-        See also header arguments without leading -- below.
-        Possible values: string
-        Default: none
-        Example: getURL https://www.example.com/ --header="User-Agent: Mozilla/1.22"
-        Example: getURL https://www.example.com/ --header="User-Agent: Mozilla/1.22\r\nContent-Type: application/xml"
-
-    Any combination of <header>=<value> (without leading --) will add a HTTP request header.
-        Can be used multiples times.
-        Example: getURL https://www.example.com/ User-Agent=FHEM/5.8
-        Example: getURL https://www.example.com/ Header1=123 Header2="xyz"
 
 
-    Optional HttpUtils connection arguments:
+  <u>Optional arguments to add HTTP header(s):</u>
 
-    If <value> contains a space then it must be enclosed in quotes
+    
+    header (without leading --)
+    
+      Any combination of 'header=value' will add a HTTP request header.
+      Can be used multiples times.
+      Allowed value: any header data
+      Default: User-Agent=fhem
+      
+      Examples:
+      
+      getURL https://www.example.com/ User-Agent=FHEM/5.8
+      getURL https://www.example.com/ Header1=123 Header2="1 2 3"
+      
+      
+    
 
-    --timeout
-        Timeout for http(s) request.
-        Possible values: >0
-        Default: 4
-        Example: getURL https://www.example.com/ --timeout=5
-
-    --noshutdown
-        Set to "0" to implizit tell the server to shutdown the connection after this request.
-        Possible values: 0,1
-        Default: 1
-        Example: getURL https://www.example.com/ --noshutdown=1
-
-    --loglevel
-        Set loglevel for under laying HttpUtils. Used for debugging. See also --debug argument.
-        Possible values: 0,1
-        Default: 4
-        Example: getURL https://www.example.com/ --loglevel=1
-
-    --hideurl
-        Hide URLs in log entries. Useful if you hand over passwords in URLs.
-        Possible values: 0,1
-        Default: 0
-        Example: getURL https://www.example.com/ --hideurl=1
-
-    --ignoreredirects
-        Redirects by the server will be ignored if set to 1. Useful to extract cockies from server request and reuse in next request.
-        Possible values: 0,1
-        Default: 0
-        Example: getURL https://www.example.com/ --ignoreredirects=1
-
+    
     --method
-        HTTP method to use.
-        Defaults: GET (without --data option), POST (with --data option)
-        Example: getURL https://www.example.com/ --method=POST --data="Testdata"
-
-    --sslargs
-        Used to specify SSL/TLS parameters. Syntax is {option1 => value [,option2 => value]}.
-        Options can be found here: IO::Socket::SSL
-        Instead of using this argument with a hash syntax, it may be more easy to use --SSL_xxx arguments. Default: FHEM system default for SSL_version will be used
-        Note: FHEM system default for SSL_version can be set with global attribute sslVersion
-        Example: getURL https://www.example.com/ --sslargs="{SSL_verify_mode => 0}"
-        Example: getURL https://www.example.com/ --sslargs="{SSL_verify_mode => 0, SSL_version => 'TLVv1_2'}"
-
+    
+     HTTP method to use.
+     Defaults: GET (without --data option), POST (with --data option)
+     
+     Example:
+     
+     getURL https://www.example.com/ --method=POST --data="Testdata"
+     
+    
+    
+    
+    
     --httpversion
-        Used to specify HTTP version for request.
-        Possible values: 1.0 or 1.1
-        Default: 1.0
-        Example: getURL https://www.example.com/ --httpversion=1.1
+    
+     Used to specify HTTP version for request.
+     Allowed values: 1.0 or 1.1
+     Default: 1.0
+     
+     Example:
+     
+     getURL https://www.example.com/ --httpversion=1.1
+     
+    
+    
 
+
+
+
+
+  <u>Log/debug options:</u>
+    --debug
+    
+     Debug server request and response processing.
+     0: disabled, 1: enable command logging, 2: enable command and HttpUtils Logging
+     Allowed values: 0,1,2
+     Default: 0
+     
+     Examples:
+     
+     getURL https://www.example.com/ debug    # enable for getURL
+     getURL https://www.example.com/ debug=1  # enbale for getURL
+     getURL https://www.example.com/ debug=2  # enable for getURL/HttpUtils
+     
+    
+    
+
+    
+    --loglevel
+    
+     Set loglevel for under laying HttpUtils. Used for debugging. See also --debug argument.
+     Allowed values: 0..5
+     Default: 4
+     Example:
+     
+     getURL https://www.example.com/ --loglevel=1
+     
+    
+    
+    
+    
+    --hideurl
+    
+     Hide URLs in log entries. Useful if you hand over passwords in URLs.
+     Allowed values: none
+     Default: disabled
+     
+     Example:
+     
+     getURL https://www.example.com/ --hideurl=1
+     
+    
+    
+
+
+
+
+
+  <u>Optional getURL/HttpUtils connection arguments:</u>
+  If &lt;value&gt; contains a space then it must be enclosed in quotes
+  
+    --timeout
+    
+     Timeout for http(s) request.
+     Allowed values: &gt;0
+     Default: 4
+     
+     Example:
+     
+     getURL https://www.example.com/ --timeout=5
+     
+    
+    
+
+    
+    --noshutdown
+    
+     Set to "0" to implizit tell the server to shutdown the connection after this request.
+     Allowed values: 0,1
+     Default: 1
+     
+     Example:
+     getURL https://www.example.com/ --noshutdown=0
+     
+    
+    
+    
+    
+    --ignoreredirects
+    
+     Redirects by the server will be ignored if set. Useful to extract cockies from server request and reuse in next request.
+     Allowed values: none
+     Default: disabled
+     
+     Example:
+     
+     getURL https://www.example.com/ --ignoreredirects
+     
+    
+    
+    
+    
     --digest
-        Prevent sending authentication via Basic-Auth. Credentials will be send only after an explizit HTTP digest request.
-        Possible values: 0,1
-        Default: 0
-        Example: getURL https://user:passs@www.example.com/ --digest=1
+    
+     Prevent sending authentication via Basic-Auth. Credentials will be send only after an explizit HTTP digest request.
+     Allowed values: none
+     Default: disabled
+
+     Example:
+     getURL https://user:passs@www.example.com/ --digest
+     
+    
+    
 
 
-    Optional SSL connection methods:
-
-    --SSL_xxx
-        Used to specify SSL/TLS connection methods for request.
-        All IO::Socket::SSL methods are supported.
-        Possible values: see: IO::Socket::SSL
-        Default: FHEM defaults
-        Example: getURL https://www.example.com/ --SSL_version="TLSv1_2"
-        Example: getURL https://www.example.com/ --SSL_verify_mode=0
-        Example: getURL https://www.example.com/ --SSL_cipher_list="ALL:!EXPORT:!LOW:!aNULL:!eNULL:!SSLv2"
-        Example: getURL https://www.example.com/ --SSL_fingerprint="SHA256:19n6fkdz0qqmowiBy6XEaA87EuG/jgWUr44ZSBhJl6Y"
 
 
-    Advanced examples:
 
-    A simple POST request:
-    getURL https://www.example.com/cmd --data="gpio,14,1"
+  <u>Optional SSL connection methods:</u>
 
-    A simple POST request, server response will be written into reading "result" of device "dev1"
-    getURL https://www.example.com/cmd --data="gpio,14,1" [dev1:result]
+    --SSL_
+    
+     Used to specify SSL/TLS connection methods for request.
+     All IO::Socket::SSL methods are supported.
+     Allowed values: see: CPAN IO::Socket::SSL
+     Default: FHEM defaults
+     
+     Examples:
+     getURL https://www.example.com/ --SSL_version="TLSv1_2"
+     getURL https://www.example.com/ --SSL_verify_mode=0
+     getURL https://www.example.com/ --SSL_cipher_list="ALL:!EXPORT:!LOW:!aNULL:!eNULL:!SSLv2"
+     getURL https://www.example.com/ --SSL_fingerprint="SHA256:19n6fkdz0qqmowiBy6XEaA87EuG/jgWUr44ZSBhJl6Y"
+     
+    
+    
+
+
+
+
+
+  <u>More examples:</u>
+  
+    # The simplest form:
+    getURL https://www.example.com/
+  
+    # The simplest form but write server response into a reading
+    getURL https://www.example.com/ [dev:reading]
+  
+    # A simple GET request (for ESPEasy):
+    getURL https://www.example.com/cmd?control=gpio,14,1
+  
+    # A simple POST request:
+    getURL https://www.example.com/cmd --data="test,14,1"
+    
+    # A simple POST request, server response will be written into reading "result" of device "dev1"
+    getURL https://www.example.com/cmd [dev1:result] --data="test,14,1"
+
+
+
+</body>
+</html>
