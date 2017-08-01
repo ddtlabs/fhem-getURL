@@ -1,0 +1,228 @@
+<html><body>
+<a name="getURL"></a>
+
+### getURL
+
+`**getURL URL**
+**getURL URL [device:reading]**
+**getURL URL --option**
+**getURL URL [device:reading] --option**
+`
+
+*   **URL**
+
+*   **[device:reading]**
+
+*   **--option**
+
+    [adopt server response (readings)](#getURL_optModify)
+
+    [add data to requests](#getURL_optData)
+
+    [add HTTP headers](#getURL_optHeader)
+
+    [configure server requests](#getURL_optConfig)
+
+    [configure SSL/TLS methods](#getURL_optSSL)
+
+    [Debug/Log](#getURL_optDebug)
+
+*   `getURL https://www.example.com/`
+
+*   `getURL https://www.example.com/ [dev0:result]`
+
+*   `getURL https://www.example.com/ --status --force`
+
+*   `getURL https://www.example.com/ [dev:rXXX] --status --force --define`
+
+*   `getURL https://www.example.com/ [dev:rYYY] --httpversion=1.1 --SSL_version=SSLv23:!SSLv3:!SSLv2`
+
+`**getURL help**
+**getURL help --option**
+`
+
+*   getUrl do not return a server response, directly. The reason is that it is working non-blocking. A possible response from server will be asynchron written into a reading of your choice. If you want to further process this value you have to use --userExitFn option or you have to define a notify (or DOIF) that triggers on the updated or changed value.
+*   Use --debug or --debug=2 argument and have a look at FHEM's log file to see requests and responses if something went wrong.
+*   An online http(s) request inspect tool can be found [here](https://requestb.in/) to examine your command line arguments if you don't have an own webserver to test with.
+*   If a (set magic) device/reading combination is specified and an error occured or the returned [HTTP status code](https://en.wikipedia.org/wiki/List_of_HTTP_status_codes) comply with 4xx, 5xx or 9xx then the status it is written into a reading with suffix '_lastStatus'. If all response codes (also good once) should be written into this reading then option '--status' must be applied. See below.
+
+*   <a name="getURL_options"><u>Optional arguments to adopt command behaviour:</u></a>
+
+    <a name="getURL--define">--define</a>
+
+    `# device 'dev' will be defined if not already defined to be able to write readings to.
+    getURL https://www.example.com/getJSON [dev:reading] --define
+    `<a name="getURL--save">--save</a>
+
+    `getURL https://www.example.com/getJSON [dev:reading] --define --save
+    `
+    <a name="getURL--force">--force</a>
+
+    `getURL https://www.example.com/doIt [dev:reading] --force # enable
+    `
+    <a name="getURL--status">--status</a>
+
+    `getURL https://www.example.com/doIt [dev:reading] --status
+    `
+
+*   <u><a name="getURL_optModify">Optional arguments to adopt server response:</a></u>
+
+    Used to filter/modify server response before it is written into a reading.
+    Multiple options can be used. They are processed in shown order.
+
+    <a name="getURL--capture">--capture</a>
+
+    [perlrequick](http://perldoc.perl.org/perlrequick.html)
+
+    [perlre](https://perldoc.perl.org/perlre.html)
+
+    [regex101.com](https://regex101.com/)
+
+    `# Unnamed capture groups to extract hour, min, sec from a string that contains
+    # "12:01:00" into 3 different readings.
+    # Destination readings are: time_1, time_2 and time_3
+    getURL https://www.example.com/ [dev1:time] --capture=".*\s(\d\d):(\d\d):(\d\d).*"
+
+    # A named capture groups to extract the same string as above.
+    # Destination readings are: time_hour, time_min and time_sec
+    getURL https://www.example.com/ [dev1:time] --capture=".*\s(?<hour>\d\d):(?<min>\d\d):(?<sec>\d\d).*"
+    `
+    <a name="getURL--json">--json</a>
+
+    `# decode a given JSON string into corresponding readings
+    getURL https://www.example.com/getJSON [dev:reading] --json
+    `
+    <a name="getURL--stripHtml">--stripHtml</a>
+
+    `getURL https://www.example.com/ [dev:reading] --stripHtml
+    `
+    <a name="getURL--substitute">--substitute</a>
+
+    `# shorten server response "power 0.5 W previous: 0 delta_time: 300"
+    # to just "power 0.5 W"
+    getURL https://www.example.com/ --substitute="(.*W).* $1"
+
+    # format each decimal number to 2 decimal places
+    getURL https://www.example.com/ --substitute="(\d+\.\d+) {sprintf("%0.2f", $1)}"`
+    <a name="getURL--userFn">--userFn</a>
+
+    `# use only the first 4 characters
+    getURL https://www.example.com/test --userFn={substr($DATA,0,4)}
+
+    # use an own sub, debug option is turned on.
+    getURL https://www.example.com/test --userFn={my_getURL_testFn($DATA,4)} --debug=1
+    `
+    <a name="getURL--userExitFn">--userExitFn</a>
+
+    `# toggle Device
+    getURL https://xxx.ddtlab.de [dev:reading] --userExitFn="set $NAME toggle"
+
+    # toggle Device and log variables
+    getURL https://xxx.ddtlab.de [dev:reading] --debug --userExitFn='set $NAME toggle;; {Log 1, "$NAME $READING $DATA $DEBUG" if $DEBUG}'
+
+    # call sub function (in 99_myUtils.pm)
+    getURL https://xxx.ddtlab.de [dev:reading] --userExitFn={mySub($NAME,$DATA)}
+    `
+
+*   <u><a name="getURL_optData">Optional arguments to add data to POST requests:</a></u>
+
+    <a name="getURL--data">--data</a>
+
+    `getURL https://www.example.com/ --data="Test data 1 2 3"
+    `
+    <a name="getURL--data-file">--data-file</a>
+
+    [modpath](https://fhem.de/commandref.html#modpath)
+
+    `getURL https://www.example.com/ --data-file=mypostdata.txt
+    `
+    <a name="getURL--form_">--form_</a>
+
+    `# add formular data "Test=abc" to request
+    getURL https://www.example.com/form.php --form_Test="abc"`
+
+*   <u><a name="getURL_optHeader">Optional arguments to add HTTP header(s):</a></u>
+
+    <a name="getURLheader">header</a> (without leading --)
+
+    `getURL https://www.example.com/ User-Agent=FHEM/5.8
+    getURL https://www.example.com/ Header1=123 Header2="1 2 3"
+    `
+    <a name="getURL--method">--method</a>
+
+    `getURL https://www.example.com/ --method=POST --data="Testdata"
+    `
+    <a name="getURL--httpversion">--httpversion</a>
+
+    `getURL https://www.example.com/ --httpversion=1.1
+    `
+
+*   <u><a name="getURL_optDebug">Log/debug options:</a></u>
+
+    <a name="getURL--debug">--debug</a>
+
+    `getURL https://www.example.com/ debug # enable for getURL
+    getURL https://www.example.com/ debug=1 # enbale for getURL
+    getURL https://www.example.com/ debug=2 # enable for getURL/HttpUtils
+    `
+    <a name="getURL--loglevel">--loglevel</a>
+
+    `getURL https://www.example.com/ --loglevel=1
+    `
+    <a name="getURL--hideurl">--hideurl</a>
+
+    `getURL https://www.example.com/ --hideurl=1
+    `
+
+*   <u><a name="getURL_optConfig">Optional getURL/HttpUtils connection arguments:</a></u>
+
+    If <value> contains a space then it must be enclosed in quotes
+
+    <a name="getURL--timeout">--timeout</a>
+
+    `getURL https://www.example.com/ --timeout=5
+    `
+    <a name="getURL--noshutdown">--noshutdown</a>
+
+    `getURL https://www.example.com/ --noshutdown=0
+    `
+    <a name="getURL--ignoreredirects">--ignoreredirects</a>
+
+    `getURL https://www.example.com/ --ignoreredirects
+    `
+    <a name="getURL--digest">--digest</a>
+
+    `getURL https://user:passs@www.example.com/ --digest
+    `
+
+*   <u><a name="getURL_optSSL">Optional SSL connection methods:</a></u>
+
+    <a name="getURL--SSL_">--SSL_</a>
+
+    [CPAN IO::Socket::SSL](http://search.cpan.org/~sullr/IO-Socket-SSL-2.016/lib/IO/Socket/SSL.pod#Description_Of_Methods)
+
+    `getURL https://www.example.com/ --SSL_version="TLSv1_2"
+    getURL https://www.example.com/ --SSL_verify_mode=0
+    getURL https://www.example.com/ --SSL_cipher_list="ALL:!EXPORT:!LOW:!aNULL:!eNULL:!SSLv2"
+    getURL https://www.example.com/ --SSL_fingerprint="SHA256:19n6fkdz0qqmowiBy6XEaA87EuG/jgWUr44ZSBhJl6Y"
+    `
+
+*   <u>More examples:</u>
+
+    # The simplest form:
+    `getURL https://www.example.com/`
+
+    # The simplest form but write server response into a reading
+    `getURL https://www.example.com/ [dev:reading]`
+
+    # A simple GET request (for ESPEasy):
+    `getURL https://www.example.com/cmd?control=gpio,14,1`
+
+    # A simple POST request:
+    `getURL https://www.example.com/cmd --data="test,14,1"`
+
+    # A simple POST request, server response will be written into reading "result" of device "dev1"
+    `getURL https://www.example.com/cmd [dev1:result] --data="test,14,1"`
+    
+ </body
+ </html>
