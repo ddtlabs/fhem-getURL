@@ -4,17 +4,20 @@
 
 
   Request a HTTP(S) URL (non-blocking, asynchron)
+  
   Server response can optionally be stored in a reading if you specify [device:reading]
+  
   Optional arguments are described below.
   
-
   
   getURL URL
+  
   getURL URL [device:reading]
+  
   getURL URL --option
+  
   getURL URL [device:reading] --option
-  
-  
+    
 
   Arguments:
   
@@ -30,7 +33,6 @@
       Server response will be written into this reading if specified. Can be omitted.
     
     
-    
     --option
     
       There are groups of optional arguments to:
@@ -40,10 +42,6 @@
         - configure server requests
         - configure SSL/TLS methods
         - Debug/Log
-    
-    
-    
-  
   
 
   Examples:
@@ -51,33 +49,23 @@
       
         getURL https://www.example.com/
       
-      
         getURL https://www.example.com/ [dev0:result]
-      
       
         getURL https://www.example.com/ --status --force 
       
-      
         getURL https://www.example.com/ [dev:rXXX] --status --force --define
-      
       
         getURL https://www.example.com/ [dev:rYYY] --httpversion=1.1 --SSL_version=SSLv23:!SSLv3:!SSLv2
       
     
-    
-
-  
   Syntax help and help for options is also available:
-  
-  
+    
   getURL help
+  
   getURL help --option
   
 
-
-
   Notes:
-    
     
       getUrl do not return a server response, directly.
       The reason is that it is working non-blocking. A possible response from
@@ -101,11 +89,7 @@
       If all response codes (also good once) should be written into this reading
       then option '--status' must be applied. See below.
     
-    
-
-
-
-
+  
   <u>Optional arguments to adopt command behaviour:</u>
   
 
