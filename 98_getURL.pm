@@ -35,35 +35,25 @@ my $gu_opts = {
   '--digest'          => { noParam => 1, cat => "http" },
   '--SSL_'            => { noParam => 0, cat => "http" },
   '--timeout'         => { noParam => 0, cat => "http/telnet" },
+# todo: commandref
   '--user'            => { noParam => 0, cat => "telnet" },
   '--pass'            => { noParam => 0, cat => "telnet" },
   '--prompt'          => { noParam => 0, cat => "telnet" },
+  '--uprompt'         => { noParam => 0, cat => "telnet" },
+  '--pprompt'         => { noParam => 0, cat => "telnet" },
   '--init'            => { noParam => 1, cat => "telnet" },
 };
 
 my %gu_json;                 # result of json_decode
 my @gu_cmdref;               # cached cmdref
 
-my $gu_http_timeout  = 5;    # default http timeout
-my $gu_debugStrLen   = 53;   # cut debug log reading value length
-my $gu_helpOptsRows  = 3;    # options help: no of rows
-my $gu_helpOptsWidth = 20;   # options help: width of rows
-my $gu_crMaxAge      = 1800; # drop @gu_cmdref after x seconds of inactivity
+my $gu_http_timeout   = 5;    # default http timeout
+my $gu_telnet_timeout = 0.5;  # default http timeout
 
-
-# ------------------------------------------------------------------------------
-sub getURL_Initialize($$)
-{
-  my ($hash) = @_;
-
-  $cmds{geturl} = { 
-    Fn  => "CommandGetURL", 
-    Hlp => "Usage: getURL <url> [<device>:<reading>] <options>\n"
-  };
-  
-  $hash->{ReadFn}		= 'getURL_telnet_reqParse';
-  $hash->{ReadyFn}	= 'getURL_telnet_reqFailed';
-}
+my $gu_debugStrLen    = 53;   # cut debug log reading value length
+my $gu_helpOptsRows   = 3;    # options help: no of rows
+my $gu_helpOptsWidth  = 20;   # options help: width of rows
+my $gu_crMaxAge       = 1800; # drop @gu_cmdref after x seconds of inactivity
 
 
 # ------------------------------------------------------------------------------
@@ -105,6 +95,21 @@ sub CommandGetURL($@)
     return "getURL: Unsupported URL: $url";
   }
 
+}
+
+
+# ------------------------------------------------------------------------------
+sub getURL_Initialize($$)
+{
+  my ($hash) = @_;
+
+  $cmds{geturl} = { 
+    Fn  => "CommandGetURL", 
+    Hlp => "Usage: getURL <url> [<device>:<reading>] <options>\n"
+  };
+  
+  $hash->{ReadFn}   = 'getURL_telnet_read';
+  $hash->{ReadyFn}  = 'getURL_telnet_ready';
 }
 
 
@@ -182,7 +187,7 @@ sub getURL_parseParams($) {
           last;
         }
       }
-      elsif ($cmdline !~ m'^telnet://') {
+      elsif ($cmdline !~ m'^telnet://' || ($cmdline =~ m'^telnet://' && $arg =~ m/^--/) ) {
         $err = "getURL Argument '$arg' is not valid.";
         $info = "getURL help";
         last;
@@ -200,7 +205,12 @@ sub getURL_parseParams($) {
   $opts->{'--cmdline'} = $cmdline;
   $opts->{'--url'} = $url;
 
-  return ($err, $url, $sm, $opts, $a); # $a are remaining cmdline arguments (other then !key=value)
+  my @tcmd; #remove arguments with no value (eg. --status)
+  foreach (@{$a}) {
+    push @tcmd, $_ if $_ !~ m/^--/;
+  }
+
+  return ($err, $url, $sm, $opts, \@tcmd); # $a are remaining cmdline arguments (other then !key=value)
 }
 
 
@@ -211,7 +221,7 @@ sub getURL_parseSetMagic($$)
   my ($d, $r, $err, $msg);
 
   my $define = $opts->{'--define'};
-  my $save = $opts->{'--save'};
+  my $save   = $opts->{'--save'};
 
   return (undef, $opts) if !$sm || $sm !~ m/^\[.*\]$/;
 
@@ -257,9 +267,75 @@ sub getURL_telnet_opts2Params($$) {
       delete $opts->{$_};
     }
   }
-  $param->{url} =~ m'telnet://(.*):(\d+)';
-  $err = "getURL wrong url format" if !$1 && !$2;
-  $param->{addr} = "$1:$2";
+
+  $param->{url} =~ m'^telnet://(?:.*:.*\@)?(.*):(\d+)';
+  $err = "getURL wrong telnet URL format." if !$1 && !$2;
+  $param->{addr} = "$1:$2" if $1 && $2;
+
+  $param->{user} = $1 if $param->{url} =~ m'^telnet://(.*):.*\@.*:\d+'
+                      && !defined $param->{user};
+  $param->{pass} = $1 if $param->{url} =~ m'^telnet://.*:(.*)\@.*:\d+'
+                      && !defined $param->{pass};
+                      
+  $param->{callback} = \&getURL_parse;
+  $param->{protocol} = "telnet";
+  $param->{prompt}   = "#" if !defined $param->{prompt};
+  $param->{uprompt}  = "^username:" if !defined $param->{uprompt};
+  $param->{pprompt}  = "^password:" if !defined $param->{pprompt};
+
+  return ($err, $param);
+}
+
+
+# ------------------------------------------------------------------------------
+sub getURL_telnet_opts2Params_test($$) {
+  my ($hash, $opts) = @_;
+  my ($param, $err);
+
+  foreach (keys %{$opts}) {
+    # Arguments for HttpUtils -> move to $param hash reference
+    if (m/^--/) {
+      $param->{substr($_,2)} = $opts->{$_};
+      delete $opts->{$_};
+    }
+  }
+
+# to be done... all other formats than ip:port
+#  $param->{url} =~ s'^telnet://'';
+
+  my $url = $param->{url};
+
+  my ($user, $pass, $addr);
+  if ($url =~ m'^telnet://(.+):(.+)\@(.+)') {
+    $user = $1;
+    $pass = $2;
+    $addr = $3;
+  }
+  elsif ($url =~ m'^telnet://(.+)') {
+    $addr = $1
+  }
+    
+  $url = "$url:23" if $url !~ m/:([0-9]{1,4}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$/;
+  
+  # extract address:port
+  $url =~ m'^telnet://(?:.+:.+\@)?(.+):(\d+)';
+  $err = "getURL wrong telnet URL format." if !$1 || !$2;
+  $param->{addr} = "$1:$2" if $1 && $2;
+
+  $param->{url} = $url;
+    
+    
+  $param->{user} = $1 if $param->{url} =~ m'^telnet://(.*):.*\@.*:\d+'
+                      && !defined $param->{user};
+  $param->{pass} = $1 if $param->{url} =~ m'^telnet://.*:(.*)\@.*:\d+'
+                      && !defined $param->{pass};
+                      
+  $param->{callback} = \&getURL_parse;
+  $param->{protocol} = "telnet";
+  $param->{prompt}   = "#" if !defined $param->{prompt};
+  $param->{uprompt}  = "^(username|login):" if !defined $param->{uprompt};
+  $param->{pprompt}  = "^password:" if !defined $param->{pprompt};
+
   return ($err, $param);
 }
 
@@ -267,136 +343,86 @@ sub getURL_telnet_opts2Params($$) {
 # ------------------------------------------------------------------------------
 sub getURL_telnet_req($$$) {
   my ($hash,$opts,$tcmds) = @_;
+  my ($err, $args);
 
-  # convert $opts to $params (format used by telnet)
-  my ($err, $args) = getURL_telnet_opts2Params($hash, $opts);
+  # convert $opts to $args (format used by telnet)
+  ($err, $args) = getURL_telnet_opts2Params($hash, $opts);
+  if ($err) {
+    Log 2, $err;
+    return $err;
+  }
+
+  # if there are no cmds to be executed
+  if (!@{$tcmds}) { 
+    Log 2, "getURL $args->{cmdline}" if !defined $args->{debug};
+    $err = "getURL error: no telnet commands specified";
+    Log 2, $err;
+    return $err;
+  }
 
   # split telnet commands at ; (must be escaped: ;;)
-  my @tcmds = split(";",join(" ",@{$tcmds}));     # split cmds at ";"
-  foreach (0..$#tcmds) { $tcmds[$_] =~ s/^\s+// } # remove leading white spaces
-
-#  Debug "-------opts";
-#  Debug Dumper $opts;
-#  Debug "-------params";
-#  Debug Dumper $param;
-#  Debug "-------tcmds";
-#  Debug Dumper $tcmds;
-#  Debug Dumper @tcmds;
-#  Debug join("_",@tcmds);
-
-  # add telnet cmds to $args, processed on _telnetRead
+  my @tcmds = split(";",join(" ",@{$tcmds}));
+  # remove leading white spaces
+  foreach (0..$#tcmds) { $tcmds[$_] =~ s/^\s+// }
+  # add telnet cmds ref to $args, processed in readFn
   $args->{cmd} = \@tcmds;
   
-  # use a temp device for each dest IP
-  my $iohash;
+  # use a temp device for each dest IP, cmds are queued to this device
   my $type = "getURL";
   my $addr = $args->{addr};
-  my $ioname = "getURL" . "_". $addr =~ s/:/_/r;
-  my $callback = $hash;
-  if ($defs{$ioname}) {
+#  my $ioname = "getURL" . "_". $addr =~ s/:/_/gr;
+#  $ioname =~ s/[^-_a-zA-Z0-9\.]//g;
+  my $ioname = "getURL" . "_". $addr;
+  $ioname = makeDeviceName($ioname);
+  my $iohash;
+  
+  # already defined (telnet session running) -> queue cmds to device
+  if (defined $defs{$ioname}) {
     $iohash = $defs{$ioname};
-    push @{ $iohash->{queue} }, $args;  # queue cmd(s), dequeued in readFn
+    # queue cmd(s), first readFn call shifts it to $hash->{current} for further processing
+    push @{ $iohash->{queue} }, $args;
   }
+  # no getURL device available for dest IP. Create it.
   else {
-    $iohash = getURL_telnet_mkIoDev($ioname, $type, $addr, $callback);
-    if (ref($iohash) eq "HASH") { # fail-save
-      # queue cmd(s), first _read call shifts it to $hash->{current}
+    $iohash = getURL_telnet_mkIoDev($ioname, $type, $addr);
+     # fail-save
+    if (ref($iohash) eq "HASH") {
+      # queue cmd(s), first readFn call shifts it to $hash->{current} for further processing
       push @{ $iohash->{queue} }, $args;
-      # Parameters for DevIo_OpenDev (new defined device)
-      $iohash->{TIMEOUT}       = $args->{timeout} ? $args->{timeout} : 0.5;
-      $iohash->{nextOpenDelay} = $args->{delay}   ? $args->{delay}   : 60;
+      # Parameters for DevIo_OpenDev
+      $iohash->{TIMEOUT} = defined $args->{timeout} ? $args->{timeout} : $gu_telnet_timeout;
+      $iohash->{devioLoglevel} = defined $args->{debug} && $args->{debug} eq "2" ? 1 : 4;
+      #
+      $iohash->{stage} = "none";
       $err = DevIo_OpenDev($iohash, 0, undef);
       if (!$err) {
         my $init = defined $args->{init} ? defined $args->{init} : "";
-        DevIo_SimpleWrite($hash, $init, 2) if exists $args->{init};
+        DevIo_SimpleWrite($hash, $init, 2) if defined $args->{init};
       }
-      else { $err = "Error opening IO device $ioname: $err" }
+      else { $err = "getURL error opening IO device $ioname: $err" }
     }
-    else { $err = "Error creating temporary IO device $ioname" }
+    else { $err = "getURL error creating temporary IO device $ioname" }
   }
+  
+  return $err;
 }
 
 
 # ------------------------------------------------------------------------------
-sub getURL_telnet_reqParse(@) {
+# ReadyFn
+sub getURL_telnet_ready(@) {
   my ($hash) = @_;
-  Debug "getURL_telnet_reqParse called";
-    
-  return undef unless($hash->{STATE} eq "opened"); # avoid reading from closed device
-  
-  my $buf = DevIo_SimpleRead($hash);
-  return '' if(!defined($buf));
+  my $name = $hash->{NAME};
+  my $debug = @{$hash->{queue}}[0]->{debug};
+  my $stage = $hash->{stage};
 
-  if (!defined $hash->{current}) {
-    $hash->{current} = shift @{ $hash->{queue} } ;
-    $hash->{stage} = "";
-    #fail-save
-    InternalTimer(gettimeofday()+3, sub(){getURL_telnet_close($hash)}, $hash);
-  }
+  Log 1, "$name Telnet request abort, timout reached (stage: $stage)."
+    if $stage ne "exit" && $debug;
 
-  # Defaults
-  $hash->{current}{prompt} = "#" if !defined $hash->{current}{prompt};
-
-  $hash->{PARTIAL} .= $buf;
-  $buf = $hash->{PARTIAL};
-  
-  if ($hash->{stage} eq "exit") {
-    if ($buf && $buf =~ m/exit/is) {
-      Debug ">>>>> exit reached, closing now";
-      getURL_telnet_close($hash);
-    }
-  }
-  elsif ($buf =~ m/^username:\s*$/mi) {
-    $hash->{stage} = "username";
-    $hash->{PARTIAL} = "";
-    Debug ">>>>> send username: $hash->{current}{user}";
-    DevIo_SimpleWrite($hash, $hash->{current}{user}, 2, 1);;
-  }
-  elsif ($buf =~ m/^password:\s*$/mi) {
-    $hash->{stage} = "password";
-    $hash->{PARTIAL} = "";
-    Debug ">>>>> send password: $hash->{current}{pass}";
-    DevIo_SimpleWrite($hash, $hash->{current}{pass}, 2, 1);
-  }
-  elsif ($buf =~ m/^$hash->{current}{prompt}\s*$/mi && $hash->{stage} ne "prompt") {
-    if (!defined $hash->{helper}{req}{cmdSend}) {
-      $hash->{helper}{req}{cmdSend} = 1;
-    }
-    else {
-      Debug ">------------------- data ----------------------";
-      Debug "\n$buf";
-      Debug "<------------------- data ----------------------";
-      $hash->{PARTIAL} = "";
-    }
-
-    my $cmd = shift $hash->{current}{cmd};
-    if ($cmd) {
-      DevIo_SimpleWrite($hash, $cmd, 2, 1);
-    }
-    else {
-      DevIo_SimpleWrite($hash, "", 2, 1) if !$cmd;
-      Debug ">>>>> last cmd " if !$cmd;
-      $hash->{stage} = "prompt" if !$cmd; # if !$hash->{helper}{req}{cmds};
-    }
-
-  }
-  elsif ($buf =~ m/$hash->{current}{prompt}/i && $hash->{stage} eq "prompt") {
-    $hash->{stage} = "exit";
-    Debug ">>>>> send exit";
-    DevIo_SimpleWrite($hash, "exit", 2, 1);
-  }
-  
-}
-
-
-# ------------------------------------------------------------------------------
-sub getURL_telnet_reqFailed(@) {
-  my ($hash) = @_;
-
-  Debug "getURL_telnet_Ready called";
   # remove first cmd from queue, we are here because no connect could be done.
   shift @{ $hash->{queue} };
-  # close with close or try again ig there are pending telnet cmds
+
+  # close or try again if there are pending telnet cmds for this host
   getURL_telnet_close($hash);
 
 return 0;
@@ -404,12 +430,95 @@ return 0;
 
 
 # ------------------------------------------------------------------------------
+# readFn
+sub getURL_telnet_read(@) {
+  my ($hash) = @_;
+  my $name = $hash->{NAME};
+#  Debug "getURL_telnet_read called";
+    
+  # avoid reading from closed device
+  return undef unless($hash->{STATE} eq "opened");
+  
+  my $buf = DevIo_SimpleRead($hash);
+  return '' if(!defined($buf));
+
+  # move next cmd incl. params for further processing
+  if (!defined $hash->{current}) {
+    $hash->{current} = shift @{ $hash->{queue} } ;
+    # reset stage flag
+    $hash->{stage} = "";
+    #fail-save, will be deleted in closeFn if everything worked fine
+    RemoveInternalTimer($hash);
+    InternalTimer(gettimeofday()+$hash->{TIMEOUT}+1, sub(){getURL_telnet_close($hash)}, $hash);
+  }
+
+  $hash->{PARTIAL} .= $buf;
+  $buf = $hash->{PARTIAL};
+  
+  my $debug   = $hash->{current}{debug};
+  my $prompt  = $hash->{current}{prompt};
+  my $user    = $hash->{current}{user};
+  my $pass    = $hash->{current}{pass};
+  my $logPass = $hash->{current}{hideurl} ? "*" x length($pass) : $pass;
+  my $uprompt = $hash->{current}{uprompt};
+  my $pprompt = $hash->{current}{pprompt};
+
+  if ($hash->{stage} eq "exit") {
+    if ($buf && $buf =~ m/exit/is) {
+      getURL_telnet_close($hash);
+    }
+  }
+  elsif ($buf =~ m/^$uprompt\s*$/mi) {
+    Log 1, "$name found login/username prompt '$uprompt', send username '$user'" if $debug;
+    $hash->{stage} = "username";
+    $hash->{PARTIAL} = "";
+    DevIo_SimpleWrite($hash, $user, 2, 1);;
+  }
+  elsif ($buf =~ m/^$pprompt\s*$/mi) {
+    Log 1, "$name found password prompt '$pprompt', send password '$logPass'" if $debug;
+    $hash->{stage} = "password";
+    $hash->{PARTIAL} = "";
+    DevIo_SimpleWrite($hash, $pass, 2, 1);
+  }
+  elsif ($buf =~ m/^$prompt\s*$/mi && $hash->{stage} ne "prompt") {
+    Log 1, "$name found telnet prompt '$prompt'" if $debug;
+    if (!defined $hash->{helper}{req}{cmdSend}) {
+      $hash->{helper}{req}{cmdSend} = 1;
+    }
+    else {
+      # $buf is complete, new prompt received -> send to callbackFn
+      my $param = $hash->{current};
+      $param->{HASH} = $hash;
+      $param->{callback}($param, "", $buf);
+      $hash->{PARTIAL} = "";
+    }
+    my $cmd = shift $hash->{current}{cmd};
+    if ($cmd) {
+      Log 1, "$name send cmd '$cmd'" if $debug;
+      DevIo_SimpleWrite($hash, $cmd, 2, 1);
+    }
+    else {
+      Log 1, "$name last cmd was send." if $debug;
+      DevIo_SimpleWrite($hash, "", 2, 1);
+      $hash->{stage} = "prompt"; # if !$hash->{helper}{req}{cmds};
+    }
+  }
+  elsif ($buf =~ m/$hash->{current}{prompt}/i && $hash->{stage} eq "prompt") {
+    Log 1, "$name send exit command." if $debug;
+    $hash->{stage} = "exit";
+    DevIo_SimpleWrite($hash, "exit", 2, 1);
+  }
+}
+
+
+# ------------------------------------------------------------------------------
 sub getURL_telnet_close($) {
   my ($hash) = @_;
   my $name = $hash->{NAME};
+  my $debug = $hash->{current}{debug};
+  Log 1, "$name clossing session" if $debug;
   
   my $addr = $hash->{DeviceName} ? $hash->{DeviceName} : "???";
-  Log 1, "Session with $addr closed";
 
   DevIo_CloseDev($hash);
   delete $hash->{helper}{req};
@@ -420,24 +529,25 @@ sub getURL_telnet_close($) {
   delete $hash->{NEXT_OPEN};
   
   if ( @{ $hash->{queue} } ) {
-  Debug "\@{ \$hash->{queue} }: ".@{ $hash->{queue} };
-    Debug ">>cmds in queue, do it again<<";
+    Log 1, "$name there are still " . @{$hash->{queue}}
+         . " commands in the queue, work off now..." if $debug && @{$hash->{queue}};
     # Params for next cmd used by DevIo_OpenDev/DevIo_SimpleWrite
     my $nextCmd = (@{$hash->{queue}})[0];
-    my $init               = $nextCmd->{init}    ? $nextCmd->{init}    : "";
-    $hash->{TIMEOUT}       = $nextCmd->{timeout} ? $nextCmd->{timeout} : 0.5;
-    $hash->{nextOpenDelay} = $nextCmd->{delay}   ? $nextCmd->{delay}   : 60;
+    my $init = defined $nextCmd->{init} ? $nextCmd->{init} : "";
+    $hash->{TIMEOUT} = defined $nextCmd->{timeout} ? $nextCmd->{timeout} : $gu_telnet_timeout;
+    $hash->{devioLoglevel} = defined $nextCmd->{debug} && $nextCmd->{debug} eq "2" ? 1 : 4;
     my $err = DevIo_OpenDev($hash, 0, undef);
     if ($err) {
-      Debug "devio_open ret: $err";
-      return "devio_open ret: $err";
+      my $ret = "$name error opening device $addr: $err";
+      Log 2, $ret if $debug;
+      return $ret;
     }
     else {
-      DevIo_SimpleWrite($hash, $init, 2) if exists $nextCmd->{init};
+      DevIo_SimpleWrite($hash, $init, 2) if defined $nextCmd->{init};
     }
   }
   else {
-    Debug "Delete device $name";
+    Log 1, "$name deleting temporary device $name" if $debug;
     delete $attr{$name};
     delete $defs{$name};
   }
@@ -445,15 +555,15 @@ sub getURL_telnet_close($) {
 
 
 # ------------------------------------------------------------------------------
-sub getURL_telnet_mkIoDev($$$$)
+sub getURL_telnet_mkIoDev($$$)
 {
-  my ($name,$type,$addr,$callback) = @_;
+  my ($name,$type,$addr) = @_;
 
   my %iohash;
   $iohash{NR}         = $devcount++;
   $iohash{NAME}       = $name;
   $iohash{TYPE}       = $type;
-  $iohash{SNAME}      = $name;
+  $iohash{SNAME}      = "getURL";
   $iohash{TEMPORARY}  = 1;
   $iohash{DeviceName} = $addr;
   $iohash{PARTIAL}    = "";
@@ -467,14 +577,15 @@ sub getURL_telnet_mkIoDev($$$$)
 # ------------------------------------------------------------------------------
 sub getURL_http_opts2Params($$) {
   my ($hash, $opts) = @_;
-  my @header;
+  my ($param, $err);
+
   # some defaults for NonblockingGet
-  my $param;
-  my $err;
   $param->{hash}     = $hash; #passthrough
   $param->{timeout}  = $gu_http_timeout;
-  $param->{callback} = \&getURL_http_reqParse;
+  $param->{callback} = \&getURL_parse;
+  $param->{protocol} = "http";
 
+  my @header;
   foreach (keys %{$opts}) {
     # Arguments for HttpUtils -> move to $param hash reference
     if (m/^--/) {
@@ -511,11 +622,13 @@ sub getURL_http_opts2Params($$) {
     $param->{data} .= join("\n", @fdata);  #todo: encode?
   }  
 
-  # expand urls to full http://boobar/
+  # expand urls to full spelling: "http://boobar/"
   $param->{url} = "http://".$param->{url} if($param->{url} !~ m'https?://');
-  $param->{url} .= "/" if getURL_paramCount($param->{url}) <= 2 ;
+  # add trailing slash (req. by HttpUtils)
+  my $slashCount = () = $param->{url} =~ m'/'g;
+  $param->{url} .= "/" if $slashCount <= 2 ;
   
-return ($err, $param);
+  return ($err, $param);
 }
 
 
@@ -540,7 +653,7 @@ sub getURL_http_req($$)
 
 
 # ------------------------------------------------------------------------------
-sub getURL_http_reqParse($$$)
+sub getURL_parse($$$)
 {
   my ($param, $err, $data) = @_;
   my $hash  = $param->{hash};
@@ -557,16 +670,18 @@ sub getURL_http_reqParse($$$)
     Log 2, "getURL $err";
   }
 
-  Log $debug ? 1 : 4, "getURL received data: ". ($data ? "\n$data" : "<undef>");
+  Log 1, "getURL received data:\n". ($data ? $data : "<undef>") if $debug && $debug eq "2";
   chomp $data;
 
   if ($d && $r) {
     $data = undef if $param->{code} && $param->{code} =~ m/^[459]\d\d$/ && !$param->{force};
     if (defined $data) {
       $data = getURL_parse_stripHtml($data,$debug) if $param->{stripHtml};
-      if ($param->{code} && $param->{code} !~ m/^[459]\d\d$/) {
-        $data = getURL_parse_substitute($data, $param->{substitute}, $debug)
-          if $param->{substitute};
+      if ((defined $param->{code} && $param->{code} !~ m/^[459]\d\d$/)
+         || (defined $param->{protocol} && $param->{protocol} eq "telnet")) {
+        if ($param->{substitute}) {
+          $data = getURL_parse_substitute($data, $param->{substitute}, $debug);
+        }
         if ($param->{capture}) {
           # $data becomes a hash referece
           $data = getURL_parse_capture($data, $param->{capture}, $debug);
@@ -611,9 +726,8 @@ sub getURL_parse_stripHtml($;$)
     $data = $hs->parse($data);
   }
   else {
-    Log 1, "getURL stripHtml: Fallback to regexp mode." if $debug;
+    Log 1, "getURL stripHtml: Fallback to regexp mode. Perl module HTML::Strip not installed" if $debug;
     $data =~ s/<(?:[^>'"]*|(['"]).*?\1)*>//gs; # html
-#    $data =~ s/(^\s+|\r|\n|\s+$)//g; # remove whitespaces and \n
     Log 1, "getURL stripHtml: $data" if $debug;
   }
   $data =~ s/(\s{2,}|\r|\n)/ /g; # replace \r\n with " "
@@ -648,10 +762,10 @@ sub getURL_parse_substitute($$;$)
   }
 
   if ($isPerl) {
-    eval "\$data =~ s/$re2/$re3/ge";
+    eval "\$data =~ s/$re2/$re3/mge";
   }
   else {
-    eval "\$data =~ s/$re2/$re3/g";
+    eval "\$data =~ s/$re2/$re3/mg";
   }
   if ($@) {
     Log 2, "getURL WARNING: Invalid regexp: $re2\n$@";
@@ -667,7 +781,6 @@ sub getURL_parse_substitute($$;$)
 sub getURL_parse_capture($$$)
 {
   my ($data, $re, $debug) = @_;
-#  return \$data if !defined $re || $re eq "";
   return undef if !defined $re || $re eq "";
   
   if ( $re =~ m/^\*/ ) {
@@ -748,7 +861,6 @@ sub getURL_parse_JSON__find($;$) {
   if ($1) {
     $data = $1;
     $data =~ s/\R//g; 
-#    $data =~ s/\s//g; 
     Log 1, "getURL findJSON:\n".$data if $debug;
     return $data;
   }
@@ -816,7 +928,8 @@ sub getURL_updateReadings($$$$$$;$)
 
   if(defined($data)) {
     # remove illegal letters from reading name
-    $dreading =~ s/[^A-Za-z\d_\.\-\/]/_/g;
+#    $dreading =~ s/[^A-Za-z\d_\.\-\/]/_/g;
+    $dreading = makeReadingName($dreading);
 
     if( ref($data) eq 'HASH' ) {
       my $s = "_";
@@ -971,8 +1084,6 @@ sub getURL_help__showTopic($$){
   my ($hash, $label) = @_;
   my ($err, $ret);
 
-#  return $gu_cmdref->{$label} if $gu_cmdref->{$label};
-
   my @c = caller;
   my $mod = $attr{global}{modpath}.substr($c[1],1);
  
@@ -1007,7 +1118,6 @@ sub getURL_help__showTopic($$){
   } #foreach
   return undef if !$ret;
 
-#  $gu_cmdref->{$label} = $ret;
   return $ret ;
 }
 
@@ -1016,7 +1126,6 @@ sub getURL_help__showTopic($$){
 sub getURL_help__readCmdref(@)
 {
   my ($file) = @_;
-#  my @cmdref;
   my $err;
   
   if(open(FH, $file)) {
@@ -1059,12 +1168,50 @@ sub getURL_checkPM($;$) {
   return 1;
 }
 
+# ------------------------------------------------------------------------------
+sub getURL_isHostname($)
+{
+  return 0 if !defined $_[0];
+  return 1 if ($_[0] =~ m/^([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9\-]*[A-Za-z0-9])$/)
+           && !(getURL_isIPv4($_[0]) || getURL_isIPv6($_[0]));
+  return 0;
+}
 
 # ------------------------------------------------------------------------------
-sub getURL_paramCount($)
+sub getURL_isFqdn($)
 {
-  return () = $_[0] =~ m'/'g  # count slashes in a string
+  return 0 if !defined $_[0];
+  return 1 if ($_[0]
+    =~ m/^(?=^.{4,253}$)(^((?!-)[a-zA-Z0-9-]{1,63}(?<!-)\.)+[a-zA-Z]{2,63}$)$/);
+  return 0;
 }
+
+# ------------------------------------------------------------------------------
+sub getURL_isIPv64($)
+{
+  return 0 if !defined $_[0];
+  return 1 if getURL_isIPv4($_[0]) || getURL_isIPv6($_[0]);
+  return 0;
+}
+
+# ------------------------------------------------------------------------------
+sub getURL_isIPv4($)
+{
+  return 0 if !defined $_[0];
+  return 1 if($_[0]
+    =~ m/^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/);
+  return 0;
+}
+
+# ------------------------------------------------------------------------------
+sub getURL_isIPv6($)
+{
+  return 0 if !defined $_[0];
+  return 1 if ($_[0]
+    =~ m/^(([0-9a-fA-F]{1,4}:){7,7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(:[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]{1,}|::(ffff(:0{1,4}){0,1}:){0,1}((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])|([0-9a-fA-F]{1,4}:){1,4}:((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9]))$/);
+  return 0;
+}
+
 
 
 1;
@@ -1089,10 +1236,10 @@ sub getURL_paramCount($)
   <b>getURL httpURL [device:reading]</b><br>
   <b>getURL httpURL --option</b><br>
   <b>getURL httpURL [device:reading] --option</b><br>
-  <b>getURL telnetURL</b><br>
-  <b>getURL telnetURL [device:reading] <cmd></b><br>
-  <b>getURL telnetURL --option <cmd></b><br>
-  <b>getURL telnetURL [device:reading] --option <cmd></b><br>
+  <b>getURL telnetURL &lt;cmd&gt;</b><br>
+  <b>getURL telnetURL [device:reading] &lt;cmd&gt;</b><br>
+  <b>getURL telnetURL --option &lt;cmd&gt;</b><br>
+  <b>getURL telnetURL [device:reading] --option &lt;cmd1;;cmd2;;cmd3&gt;</b><br>
   </code>
   <br>
 
@@ -1125,7 +1272,7 @@ sub getURL_paramCount($)
 <br>
     <li><b>cmd</b><br>
     <ul>
-      Telnet command(s)<br>
+      Telnet command(s). Multiple commands must be splited by: ;;<br>
     </ul>
     </li>
     
